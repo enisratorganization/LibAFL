@@ -136,7 +136,7 @@ fn configure_qemu(
         .arg("--disable-dsound")
         .arg("--disable-fuse")
         .arg("--disable-fuse-lseek")
-        .arg("--disable-gcrypt")
+        .arg("--enable-gcrypt")
         .arg("--disable-gettext")
         .arg("--disable-gio")
         .arg("--disable-glusterfs")
