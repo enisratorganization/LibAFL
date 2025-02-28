@@ -402,6 +402,8 @@ pub fn build(
         &target_suffix,
     );
 
+    println!("cargo:warning=QEMU configure command: {:?}", config_cmd);
+
     let current_config_signature = get_config_signature(&config_cmd);
     let must_reconfigure = if libafl_qemu_force_configure {
         // If the user asked to reconfigure, do so
