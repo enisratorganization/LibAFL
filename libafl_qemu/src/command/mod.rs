@@ -363,6 +363,8 @@ where
     ) -> Result<Option<EmulatorDriverResult<C>>, EmulatorDriverError> {
         let qemu = emu.qemu();
 
+        log::debug!("{self}");
+
         let ret_value = self
             .location
             .write(qemu, input.target_bytes().as_slice())
@@ -485,6 +487,8 @@ where
         _ret_reg: Option<Regs>,
     ) -> Result<Option<EmulatorDriverResult<C>>, EmulatorDriverError> {
         let qemu = emu.qemu();
+
+        log::debug!("{self}");
 
         if !emu.command_manager_mut().has_started() {
             return Err(EmulatorDriverError::CommandError(

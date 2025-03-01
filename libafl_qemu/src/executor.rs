@@ -182,6 +182,7 @@ pub unsafe fn inproc_qemu_timeout_handler<E, EM, ET, I, OF, S, Z>(
     #[cfg(feature = "systemmode")]
     unsafe {
         if BREAK_ON_TMOUT.load(Ordering::Acquire) {
+            log::debug!("Calling libafl_exit_request_timeout !");
             libafl_exit_request_timeout();
         } else {
             libafl::executors::hooks::unix::unix_signal_handler::inproc_timeout_handler::<
