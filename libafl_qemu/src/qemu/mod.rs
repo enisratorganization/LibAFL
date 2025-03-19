@@ -26,7 +26,7 @@ use libafl_qemu_sys::{
     libafl_qemu_cpu_index, libafl_qemu_current_cpu, libafl_qemu_gdb_reply, libafl_qemu_get_cpu,
     libafl_qemu_init, libafl_qemu_num_cpus, libafl_qemu_num_regs, libafl_qemu_read_reg,
     libafl_qemu_remove_breakpoint, libafl_qemu_set_breakpoint, libafl_qemu_trigger_breakpoint,
-    libafl_qemu_write_reg,
+    libafl_qemu_write_reg, libafl_blk_write, blk_by_name,
 };
 #[cfg(feature = "systemmode")]
 use libafl_qemu_sys::{libafl_qemu_remove_hw_breakpoint, libafl_qemu_set_hw_breakpoint};
@@ -767,6 +767,29 @@ impl Qemu {
         self.current_cpu()
             .unwrap_or_else(|| self.cpu_from_index(0))
             .write_mem(addr, buf)
+    }
+
+    /// Write to a block device by its name, at given offset
+    pub fn write_to_blockdev(&self, blk_name: &str, offset: i64, buf: &[u8]) -> Result<(), QemuRWError> {
+        let c_blk_name =CString::new(blk_name).unwrap();
+        let blk = unsafe{ blk_by_name(c_blk_name.as_ptr()) };
+        let ret = unsafe {
+            libafl_blk_write(
+                blk,
+                buf.as_ptr() as *mut _,
+                offset,
+                buf.len().try_into().unwrap(),
+            )
+        };
+        if ret != 0 {
+            Err(QemuRWError::new(
+                QemuRWErrorKind::Write,
+                QemuRWErrorCause::Internal(ret),
+                None,
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// Read a value from memory to a guest addr, taking into account the potential indirections with the current CPU.

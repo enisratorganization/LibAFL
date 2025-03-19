@@ -60,6 +60,7 @@ const WRAPPER_HEADER: &str = r#"
 #include "sysemu/tcg.h"
 #include "sysemu/runstate.h"
 #include "sysemu/replay.h"
+#include "sysemu/block-backend.h"
 
 #include "libafl/system.h"
 #include "libafl/qemu_snapshot.h"
@@ -178,6 +179,7 @@ pub fn generate(
         .allowlist_function("vm_start")
         .allowlist_function("qemu_main_loop")
         .allowlist_function("qemu_cleanup")
+        .allowlist_function("blk_by_name")
         .blocklist_function("main_loop_wait") // bindgen issue #1313
         .blocklist_type("siginfo_t")
         .raw_line("use libc::siginfo_t;")

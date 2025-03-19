@@ -40,6 +40,7 @@ pub enum QemuRWErrorCause {
     CurrentCpuNotFound,
     Reg(i32),
     WrongMemoryLocation(GuestAddr, usize), // addr, size
+    Internal(i32)
 }
 
 #[derive(Clone, Debug)]
