@@ -19,6 +19,7 @@ pub struct BreakpointId(u64);
 // TODO: distinguish breakpoints with IDs instead of addresses to avoid collisions.
 #[derive(Clone)]
 pub struct Breakpoint<C> {
+    pub desc: String,
     id: BreakpointId,
     addr: GuestAddr,
     cmd: Option<C>,
@@ -28,7 +29,7 @@ pub struct Breakpoint<C> {
 
 impl<C> Debug for Breakpoint<C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "BP {:?} @ addr {:?}", self.id, self.addr)
+        write!(f, "BP {:?} @ addr 0x{:x?} [{:?}]", self.id, self.addr, self.desc)
     }
 }
 
@@ -82,8 +83,9 @@ impl<C> Borrow<GuestAddr> for Breakpoint<C> {
 impl<C> Breakpoint<C> {
     // Emu will return with the breakpoint as exit reason.
     #[must_use]
-    pub fn without_command(addr: GuestAddr, disable_on_trigger: bool) -> Self {
+    pub fn without_command(addr: GuestAddr, desc: &str, disable_on_trigger: bool) -> Self {
         Self {
+            desc: desc.to_owned(),
             id: BreakpointId::new(),
             addr,
             cmd: None,
@@ -94,8 +96,9 @@ impl<C> Breakpoint<C> {
 
     // Emu will execute the command when it meets the breakpoint.
     #[must_use]
-    pub fn with_command(addr: GuestAddr, cmd: C, disable_on_trigger: bool) -> Self {
+    pub fn with_command(addr: GuestAddr, desc: &str, cmd: C, disable_on_trigger: bool) -> Self {
         Self {
+            desc: desc.to_owned(),
             id: BreakpointId::new(),
             addr,
             cmd: Some(cmd),
