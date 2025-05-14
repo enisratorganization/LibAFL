@@ -147,7 +147,7 @@ impl<AF, PF, V, const IS_INITIALIZED: bool, const IS_CONST_MAP: bool, const MAP_
 impl<AF, PF, V, const IS_INITIALIZED: bool, const IS_CONST_MAP: bool, const MAP_SIZE: usize>
     EdgeCoverageModuleBuilder<AF, PF, V, IS_INITIALIZED, IS_CONST_MAP, MAP_SIZE>
 {
-    fn new(
+    pub fn new(
         variant: V,
         address_filter: AF,
         page_filter: PF,

@@ -108,8 +108,12 @@ mod generators {
         {
             unsafe {
                 assert!(LIBAFL_QEMU_EDGES_MAP_MASK_MAX > 0);
-                let edges_map_size_ptr = &raw const LIBAFL_QEMU_EDGES_MAP_SIZE_PTR;
-                assert_ne!(*edges_map_size_ptr, ptr::null_mut());
+            }
+            if !IS_CONST_MAP {
+                unsafe {
+                    let edges_map_size_ptr = &raw const LIBAFL_QEMU_EDGES_MAP_SIZE_PTR;
+                    assert_ne!(*edges_map_size_ptr, ptr::null_mut());
+                }
             }
 
             #[cfg(feature = "usermode")]
