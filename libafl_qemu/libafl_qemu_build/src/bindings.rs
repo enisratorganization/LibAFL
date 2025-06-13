@@ -181,6 +181,7 @@ pub fn generate(
         .allowlist_function("qemu_main_loop")
         .allowlist_function("qemu_cleanup")
         .allowlist_function("blk_by_name")
+        .allowlist_function("change_log_file")
         .blocklist_function("main_loop_wait") // bindgen issue #1313
         .blocklist_type("siginfo_t")
         .raw_line("use libc::siginfo_t;")

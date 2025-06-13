@@ -234,6 +234,8 @@ where
                             usize::from(*history == O::Entry::default());
                         *history = O::Entry::max_value();
                         unstable_entries.push(idx);
+
+                        log::info!("Unstable input found: {}", input.generate_name(None));
                     }
                 }
 
