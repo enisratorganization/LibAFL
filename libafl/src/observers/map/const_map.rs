@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     Error,
-    observers::{ConstLenMapObserver, Observer, map::MapObserver},
+    observers::{ConstLenMapObserver, Observer, map::MapObserver, ExitKind},
 };
 
 /// Use a const size to speedup `Feedback::is_interesting` when the user can
@@ -24,6 +24,7 @@ pub struct ConstMapObserver<'a, T, const N: usize> {
     map: OwnedMutSizedSlice<'a, T, N>,
     initial: T,
     name: Cow<'static, str>,
+    ign: Vec<usize>
 }
 
 impl<I, S, T, const N: usize> Observer<I, S> for ConstMapObserver<'_, T, N>
@@ -33,6 +34,12 @@ where
     #[inline]
     fn pre_exec(&mut self, _state: &mut S, _input: &I) -> Result<(), Error> {
         self.reset_map()
+    }
+
+    #[inline]
+    fn post_exec(&mut self, _state: &mut S, _input: &I, _exit_kind: &ExitKind) -> Result<(), Error> {
+        self.process_ignore_list(&self.ign.clone());
+        Ok(())
     }
 }
 
@@ -140,6 +147,12 @@ where
         }
         res
     }
+
+    fn ignore(&mut self, indices: &[usize]) {
+        for i in indices{
+            self.ign.push(*i);
+        }
+    }
 }
 
 impl<T, const N: usize> ConstLenMapObserver<N> for ConstMapObserver<'_, T, N>
@@ -185,6 +198,7 @@ where
             map: OwnedMutSizedSlice::from(map),
             name: Cow::from(name),
             initial: T::default(),
+            ign: Vec::new()
         }
     }
 
@@ -199,6 +213,7 @@ where
                 map: OwnedMutSizedSlice::from_raw_mut(map_ptr),
                 name: Cow::from(name),
                 initial: T::default(),
+                ign: Vec::new()
             }
         }
     }

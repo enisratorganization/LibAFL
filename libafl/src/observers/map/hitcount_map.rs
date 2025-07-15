@@ -97,6 +97,8 @@ where
     #[inline]
     #[expect(clippy::cast_ptr_alignment)]
     fn post_exec(&mut self, state: &mut S, input: &I, exit_kind: &ExitKind) -> Result<(), Error> {
+        let res = self.base.post_exec(state, input, exit_kind);
+
         let mut map = self.as_slice_mut();
         let mut len = map.len();
         let align_offset = map.as_ptr().align_offset(size_of::<u16>());
@@ -140,7 +142,8 @@ where
 
         drop(map);
 
-        self.base.post_exec(state, input, exit_kind)
+        //self.base.post_exec(state, input, exit_kind) // Does it make sense to put this at the END? Dont think so...
+        res
     }
 }
 
@@ -227,6 +230,10 @@ where
 
     fn how_many_set(&self, indexes: &[usize]) -> usize {
         self.base.how_many_set(indexes)
+    }
+
+    fn ignore(&mut self, indices: &[usize]) {
+        self.base.ignore(indices);
     }
 }
 
@@ -353,11 +360,14 @@ where
 
     #[inline]
     fn post_exec(&mut self, state: &mut S, input: &I, exit_kind: &ExitKind) -> Result<(), Error> {
+        let res = self.base.post_exec(state, input, exit_kind);
+
         for mut item in self.as_iter_mut() {
             *item = unsafe { *COUNT_CLASS_LOOKUP.get_unchecked((*item) as usize) };
         }
 
-        self.base.post_exec(state, input, exit_kind)
+        //self.base.post_exec(state, input, exit_kind) // Does it make sense to put this at the END? Dont think so...
+        res 
     }
 }
 

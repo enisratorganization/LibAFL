@@ -360,6 +360,16 @@ pub trait MapObserver:
     /// Type of each entry in this map
     type Entry: PartialEq + Copy;
 
+    /// Ignore these indices (set to initial after exec)
+    fn ignore(&mut self, _indices: &[usize]){ }
+
+    /// process given ignore list after exec
+    fn process_ignore_list(&mut self, indices: &[usize]) {
+        for i in indices {
+            self.set(*i, self.initial());
+        }
+    }
+
     /// Get the value at `idx`
     fn get(&self, idx: usize) -> Self::Entry;
 
