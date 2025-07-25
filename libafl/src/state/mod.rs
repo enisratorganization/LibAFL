@@ -13,6 +13,7 @@ use core::{
 use std::{
     fs,
     path::{Path, PathBuf},
+    string::{String, ToString},
 };
 
 #[cfg(feature = "std")]
@@ -26,16 +27,21 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 mod stack;
 pub use stack::StageStack;
 
+#[cfg(feature = "std")]
+use crate::executors::HasObservers;
 #[cfg(feature = "introspection")]
 use crate::monitors::stats::ClientPerfStats;
 use crate::{
     Error, HasMetadata, HasNamedMetadata,
     corpus::{Corpus, CorpusId, HasCurrentCorpusId, HasTestcase, InMemoryCorpus, Testcase},
     events::{Event, EventFirer, LogSeverity},
+    executors::{Executor, ExitKind},
+    feedbacks::HasObserverHandle,
     feedbacks::StateInitializer,
     fuzzer::{Evaluator, ExecuteInputResult},
     generators::Generator,
     inputs::{Input, NopInput},
+    observers::{MapObserver, ObserversTuple},
     stages::StageId,
 };
 
@@ -1023,6 +1029,119 @@ where
             return self
                 .load_initial_inputs_multicore(fuzzer, executor, manager, in_dirs, core_id, cores);
         }
+        Ok(())
+    }
+
+    /// Execute corpus initial corpus entries multiple times to observe edges already unstable
+    pub fn initially_calibrate_unstable_edges<OR, E, EM, Z, F, OT, O>(
+        &mut self,
+        fuzzer: &mut Z,
+        executor: &mut E,
+        mgr: &mut EM,
+        map_feedback: &F,
+        iterations: u32
+    ) -> Result<(), Error>
+    where
+        E: Executor<EM, I, Self, Z> + HasObservers<Observers = OT>,
+        OT: ObserversTuple<I, Self>,
+        EM: EventFirer<I, Self>,
+        Z: Evaluator<E, EM, I, Self>,
+        F: HasObserverHandle<Observer = OR>,
+        OR: AsMut<O> + AsRef<O>,
+        O: MapObserver,
+    {
+        let map_observer_handle = map_feedback.observer_handle().clone();
+
+        let mut unstable_entries: Vec<usize> = vec![];
+
+        for id in self.corpus.ids().collect::<Vec<_>>() {
+
+            let input_maybe_empty = {
+                let testcase = self.corpus().get(id)?.borrow();
+                testcase.input().clone()
+            };
+
+            if let Some(input) = input_maybe_empty{
+                // Run once to get the initial calibration map
+                executor.observers_mut().pre_exec_all(self, &input)?;
+                let exit_kind = executor.run_target(fuzzer, self, mgr, &input)?;
+                if exit_kind != ExitKind::Ok {
+                    log::warn!("Corpus entry {} errored on execution!", id);
+                };
+
+                executor
+                    .observers_mut()
+                    .post_exec_all(self, &input, &exit_kind)?;
+
+                let observers = &executor.observers();
+                let map_first = observers[&map_observer_handle].as_ref();
+                let map_first_entries = map_first.to_vec();
+                let _map_first_len = map_first.to_vec().len();
+
+                // Run CAL_STAGE_START - 1 times, increase by 2 for every time a new
+                // run is found to be unstable or to crash with CAL_STAGE_MAX total runs.
+                let mut i = 1;
+                let mut has_errors = false;
+
+                while i < iterations {
+                    executor.observers_mut().pre_exec_all(self, &input)?;
+
+                    let exit_kind = executor.run_target(fuzzer, self, mgr, &input)?;
+                    if exit_kind != ExitKind::Ok {
+                        if !has_errors {
+                            log::warn!("Corpus entry {} errored on execution!", id);
+
+                            has_errors = true;
+                        }
+                    }
+
+                    executor
+                        .observers_mut()
+                        .post_exec_all(self, &input, &exit_kind)?;
+
+                    if exit_kind != ExitKind::Timeout {
+                        let map = &executor.observers()[&map_observer_handle].as_ref().to_vec();
+
+                        for (idx, (first, cur)) in
+                            map_first_entries.iter().zip(map.iter()).enumerate()
+                        {
+                            if *first != *cur {
+                                unstable_entries.push(idx);
+                            }
+                        }
+                    }
+
+                    i += 1;
+                }
+            } else {
+                log::warn!("Corpus entry {} has empty input!", id);
+            }
+        }
+
+        unstable_entries.sort_unstable();
+        unstable_entries.dedup();
+
+        let observers = &mut executor.observers_mut();
+        observers[&map_observer_handle]
+            .as_mut()
+            .ignore(&unstable_entries);
+
+        mgr.fire(
+            self,
+            Event::Log {
+                severity_level: LogSeverity::Debug,
+                message: format!(
+                    "Ignoring {} edges, edge ids: {}",
+                    unstable_entries.len(),
+                    unstable_entries
+                        .iter()
+                        .map(|&x| x.to_string() + ",")
+                        .collect::<String>()
+                ),
+                phantom: PhantomData::<I>,
+            },
+        )?;
+
         Ok(())
     }
 }
