@@ -77,9 +77,10 @@ impl Default for UnstableEntriesMetadata {
     }
 }
 
+
 /// The calibration stage will measure the average exec time and the target's stability for this input.
 #[derive(Clone, Debug)]
-pub struct CalibrationStage<C, E, I, O, OT, S> {
+pub struct CalibrationStage<C, E, I, O, OT, S, UC> {
     map_observer_handle: Handle<C>,
     map_name: Cow<'static, str>,
     name: Cow<'static, str>,
@@ -87,9 +88,10 @@ pub struct CalibrationStage<C, E, I, O, OT, S> {
     /// If we should track stability
     track_stability: bool,
     phantom: PhantomData<(E, I, O, OT, S)>,
+    unstable_corpus: Option<UC> // put severely unstable testcases here (those inputs could lead to OOBR!)
 }
 
-impl<C, E, EM, I, O, OT, S, Z> Stage<E, EM, S, Z> for CalibrationStage<C, E, I, O, OT, S>
+impl<C, E, EM, I, O, OT, S, Z, UC> Stage<E, EM, S, Z> for CalibrationStage<C, E, I, O, OT, S, UC>
 where
     E: Executor<EM, I, S, Z> + HasObservers<Observers = OT>,
     EM: EventFirer<I, S>,
@@ -106,6 +108,7 @@ where
         + HasCurrentCorpusId,
     Z: Evaluator<E, EM, I, S>,
     I: Input,
+    UC: Corpus<I>
 {
     #[inline]
     #[expect(clippy::too_many_lines, clippy::cast_precision_loss)]
@@ -172,7 +175,8 @@ where
         };
         let map_first_entries = map_first.to_vec();
         let map_first_len = map_first.to_vec().len();
-        let mut unstable_entries: Vec<usize> = vec![];
+        let mut new_unstable_entries: Vec<usize> = vec![];
+        let mut current_testcase_unstable_entries: Vec<usize> = vec![];
         // Run CAL_STAGE_START - 1 times, increase by 2 for every time a new
         // run is found to be unstable or to crash with CAL_STAGE_MAX total runs.
         let mut i = 1;
@@ -227,30 +231,71 @@ where
                     .zip(map.iter().zip(history_map.iter_mut()))
                     .enumerate()
                 {
+                    if *first != *cur {
+                        current_testcase_unstable_entries.push(idx);
+                    }
                     if *first != *cur && *history != O::Entry::max_value() {
                         // If we just hit a history map entry that was not covered before, but is now flagged as flaky,
                         // we need to make sure the `num_covered_map_indexes` is kept in sync.
                         map_state.num_covered_map_indexes +=
                             usize::from(*history == O::Entry::default());
                         *history = O::Entry::max_value();
-                        unstable_entries.push(idx);
+                        new_unstable_entries.push(idx);
                     }
                 }
 
-                if !unstable_entries.is_empty() && iter < CAL_STAGE_MAX {
+                if !new_unstable_entries.is_empty() && iter < CAL_STAGE_MAX {
                     iter += 2;
                 }
             }
             i += 1;
         }
 
+        // Detect instability in environments with non-determinism. This might be due to 1. broken executor (guest) environment or 2. due to BUGs such as OOBR in the target software
+        if self.unstable_corpus.is_some() && !current_testcase_unstable_entries.is_empty() {
+            let ratio = current_testcase_unstable_entries.len() as f64 / map_first_filled_count as f64;
+            // Choose a threshold big enough to detect a  distinct control flow, not just some loop counts varying
+            if ratio > 0.01 && current_testcase_unstable_entries.len() > 20 {
+                mgr.log(
+                    state,
+                    LogSeverity::Warn,
+                    "Severely unstable testcase found!".into(),
+                )?;
+                log::info!("Severely unstable testcase found: {}", ratio);
+
+                new_unstable_entries.clear(); // no use to record these, as it will warp the statistics alot...
+
+                // instead, amend the testcase to enable later feedback on those metadata
+                let mut testcase = state.current_testcase_mut()?;
+                // If the testcase doesn't have its own `SchedulerTestcaseMetadata`, create it.
+                let data =
+                    if let Ok(metadata) = testcase.metadata_mut::<UnstableEntriesMetadata>() {
+                        metadata
+                    } else {
+                        testcase.add_metadata(UnstableEntriesMetadata::new());
+                        testcase
+                            .metadata_mut::<UnstableEntriesMetadata>()
+                            .unwrap()
+                    };
+
+                for item in current_testcase_unstable_entries {
+                    data.unstable_entries.insert(item); // Insert newly found items
+                }
+                data.filled_entries_count = map_first_filled_count;
+
+                if let Some(unstable_corpus) = &mut self.unstable_corpus {
+                    unstable_corpus.add(testcase.clone())?;
+                }
+            }
+        }
+
         let mut send_default_stability = false;
-        let unstable_found = !unstable_entries.is_empty();
+        let unstable_found = !new_unstable_entries.is_empty();
         if unstable_found {
             let metadata = state.metadata_or_insert_with(UnstableEntriesMetadata::new);
 
             // If we see new unstable entries executing this new corpus entries, then merge with the existing one
-            for item in unstable_entries {
+            for item in new_unstable_entries {
                 metadata.unstable_entries.insert(item); // Insert newly found items
             }
             metadata.filled_entries_count = map_first_filled_count;
@@ -366,7 +411,7 @@ where
     }
 }
 
-impl<C, E, I, O, OT, S> Restartable<S> for CalibrationStage<C, E, I, O, OT, S>
+impl<C, E, I, O, OT, S, UC> Restartable<S> for CalibrationStage<C, E, I, O, OT, S, UC>
 where
     S: HasMetadata + HasNamedMetadata + HasCurrentCorpusId,
 {
@@ -385,16 +430,17 @@ where
     }
 }
 
-impl<C, E, I, O, OT, S> CalibrationStage<C, E, I, O, OT, S>
+impl<C, E, I, O, OT, S, UC> CalibrationStage<C, E, I, O, OT, S, UC>
 where
     C: AsRef<O>,
     O: MapObserver,
     for<'it> O: AsIter<'it, Item = O::Entry>,
     OT: ObserversTuple<I, S>,
+    UC: Corpus<I>
 {
     /// Create a new [`CalibrationStage`].
     #[must_use]
-    pub fn new<F>(map_feedback: &F) -> Self
+    pub fn new<F>(map_feedback: &F, unstable_corpus: Option<UC>) -> Self
     where
         F: HasObserverHandle<Observer = C> + Named,
     {
@@ -408,6 +454,7 @@ where
             name: Cow::Owned(
                 CALIBRATION_STAGE_NAME.to_owned() + ":" + map_name.into_owned().as_str(),
             ),
+            unstable_corpus
         }
     }
 
@@ -417,13 +464,13 @@ where
     where
         F: HasObserverHandle<Observer = C> + Named,
     {
-        let mut ret = Self::new(map_feedback);
+        let mut ret = Self::new(map_feedback, None);
         ret.track_stability = false;
         ret
     }
 }
 
-impl<C, E, I, O, OT, S> Named for CalibrationStage<C, E, I, O, OT, S> {
+impl<C, E, I, O, OT, S, UC> Named for CalibrationStage<C, E, I, O, OT, S, UC> {
     fn name(&self) -> &Cow<'static, str> {
         &self.name
     }
