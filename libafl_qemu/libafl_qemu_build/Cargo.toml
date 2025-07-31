@@ -31,6 +31,10 @@ clippy = [] # special feature for clippy, don't use in normal projects§
 
 qemu_sanitizers = [] # Enable QEMU sanitizers
 
+## support coverage recording (edge observer) compiled during Qemu TCG
+qemu_inline_tcg_coverage_recording = []
+
+
 paranoid_debug = [
 ] # Will perform as many checks as possible. The target will be greatly slowed down.
 

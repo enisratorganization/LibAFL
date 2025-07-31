@@ -89,7 +89,9 @@ const WRAPPER_HEADER: &str = r#"
 #include "libafl/exit.h"
 #include "libafl/jit.h"
 #include "libafl/utils.h"
+#ifdef LIBAFL_INLINE_TCG_COVERAGE_RECORDING
 #include "libafl/coverage-recording.h"
+#endif
 
 #include "libafl/hook.h"
 

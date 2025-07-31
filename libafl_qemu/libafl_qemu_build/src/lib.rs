@@ -239,6 +239,9 @@ fn qemu_bindgen_clang_args(
     clang_args.push(format!("-I{}/quote", qemu_dir.display()));
     clang_args.push(target_arch_dir);
 
+    #[cfg(feature = "qemu_inline_tcg_coverage_recording")]
+    clang_args.push("-DLIBAFL_INLINE_TCG_COVERAGE_RECORDING".to_string());
+
     clang_args
 }
 
