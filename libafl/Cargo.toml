@@ -93,6 +93,10 @@ fork = ["libafl_bolts/derive"]
 ## If this feature is set, `LibAFL` targets (and the fuzzer) will crash on `SIGPIPE` on unix systems.
 handle_sigpipe = []
 
+## Put "highly" unstable testcases into a separate corpus (just like solutions)
+## These are interesting as they could indicate bugs in target code such as OOBR
+unstable_corpus = []
+
 #! ## Additional Components
 
 ## Enables `TcpEventManager`, a simple EventManager proxying everything via TCP. This uses `tokio`.

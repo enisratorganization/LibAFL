@@ -24,7 +24,7 @@ use crate::{
     observers::{MapObserver, ObserversTuple},
     schedulers::powersched::SchedulerMetadata,
     stages::{Restartable, RetryCountRestartHelper, Stage},
-    state::{HasCorpus, HasCurrentTestcase, HasExecutions},
+    state::{HasCorpus, HasCurrentTestcase, HasExecutions, HasUnstableCorpus},
 };
 
 /// AFL++'s `CAL_CYCLES_FAST` + 1
@@ -80,18 +80,17 @@ impl Default for UnstableEntriesMetadata {
 
 /// The calibration stage will measure the average exec time and the target's stability for this input.
 #[derive(Clone, Debug)]
-pub struct CalibrationStage<C, E, I, O, OT, S, UC> {
+pub struct CalibrationStage<C, E, I, O, OT, S> {
     map_observer_handle: Handle<C>,
     map_name: Cow<'static, str>,
     name: Cow<'static, str>,
     stage_max: usize,
     /// If we should track stability
     track_stability: bool,
-    phantom: PhantomData<(E, I, O, OT, S)>,
-    unstable_corpus: Option<UC> // put severely unstable testcases here (those inputs could lead to OOBR!)
+    phantom: PhantomData<(E, I, O, OT, S)>
 }
 
-impl<C, E, EM, I, O, OT, S, Z, UC> Stage<E, EM, S, Z> for CalibrationStage<C, E, I, O, OT, S, UC>
+impl<C, E, EM, I, O, OT, S, Z> Stage<E, EM, S, Z> for CalibrationStage<C, E, I, O, OT, S>
 where
     E: Executor<EM, I, S, Z> + HasObservers<Observers = OT>,
     EM: EventFirer<I, S>,
@@ -105,10 +104,10 @@ where
         + HasNamedMetadata
         + HasExecutions
         + HasCurrentTestcase<I>
-        + HasCurrentCorpusId,
+        + HasCurrentCorpusId
+        + HasUnstableCorpus<I>,
     Z: Evaluator<E, EM, I, S>,
-    I: Input,
-    UC: Corpus<I>
+    I: Input
 {
     #[inline]
     #[expect(clippy::too_many_lines, clippy::cast_precision_loss)]
@@ -251,8 +250,9 @@ where
             i += 1;
         }
 
+        #[cfg(feature = "unstable_corpus")]
         // Detect instability in environments with non-determinism. This might be due to 1. broken executor (guest) environment or 2. due to BUGs such as OOBR in the target software
-        if self.unstable_corpus.is_some() && !current_testcase_unstable_entries.is_empty() {
+        if !current_testcase_unstable_entries.is_empty() {
             let ratio = current_testcase_unstable_entries.len() as f64 / map_first_filled_count as f64;
             // Choose a threshold big enough to detect a  distinct control flow, not just some loop counts varying
             if ratio > 0.01 && current_testcase_unstable_entries.len() > 20 {
@@ -266,7 +266,7 @@ where
                 new_unstable_entries.clear(); // no use to record these, as it will warp the statistics alot...
 
                 // instead, amend the testcase to enable later feedback on those metadata
-                let mut testcase = state.current_testcase_mut()?;
+                let mut testcase = state.current_testcase()?.clone();
                 // If the testcase doesn't have its own `SchedulerTestcaseMetadata`, create it.
                 let data =
                     if let Ok(metadata) = testcase.metadata_mut::<UnstableEntriesMetadata>() {
@@ -283,9 +283,7 @@ where
                 }
                 data.filled_entries_count = map_first_filled_count;
 
-                if let Some(unstable_corpus) = &mut self.unstable_corpus {
-                    unstable_corpus.add(testcase.clone())?;
-                }
+                state.unstable_corpus_mut().add(testcase)?;
             }
         }
 
@@ -411,7 +409,7 @@ where
     }
 }
 
-impl<C, E, I, O, OT, S, UC> Restartable<S> for CalibrationStage<C, E, I, O, OT, S, UC>
+impl<C, E, I, O, OT, S> Restartable<S> for CalibrationStage<C, E, I, O, OT, S>
 where
     S: HasMetadata + HasNamedMetadata + HasCurrentCorpusId,
 {
@@ -430,17 +428,16 @@ where
     }
 }
 
-impl<C, E, I, O, OT, S, UC> CalibrationStage<C, E, I, O, OT, S, UC>
+impl<C, E, I, O, OT, S> CalibrationStage<C, E, I, O, OT, S>
 where
     C: AsRef<O>,
     O: MapObserver,
     for<'it> O: AsIter<'it, Item = O::Entry>,
-    OT: ObserversTuple<I, S>,
-    UC: Corpus<I>
+    OT: ObserversTuple<I, S>
 {
     /// Create a new [`CalibrationStage`].
     #[must_use]
-    pub fn new<F>(map_feedback: &F, unstable_corpus: Option<UC>) -> Self
+    pub fn new<F>(map_feedback: &F) -> Self
     where
         F: HasObserverHandle<Observer = C> + Named,
     {
@@ -453,8 +450,7 @@ where
             phantom: PhantomData,
             name: Cow::Owned(
                 CALIBRATION_STAGE_NAME.to_owned() + ":" + map_name.into_owned().as_str(),
-            ),
-            unstable_corpus
+            )
         }
     }
 
@@ -464,13 +460,13 @@ where
     where
         F: HasObserverHandle<Observer = C> + Named,
     {
-        let mut ret = Self::new(map_feedback, None);
+        let mut ret = Self::new(map_feedback);
         ret.track_stability = false;
         ret
     }
 }
 
-impl<C, E, I, O, OT, S, UC> Named for CalibrationStage<C, E, I, O, OT, S, UC> {
+impl<C, E, I, O, OT, S> Named for CalibrationStage<C, E, I, O, OT, S> {
     fn name(&self) -> &Cow<'static, str> {
         &self.name
     }

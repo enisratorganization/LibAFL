@@ -59,6 +59,19 @@ pub trait HasCorpus<I> {
     fn corpus_mut(&mut self) -> &mut Self::Corpus;
 }
 
+#[cfg(feature = "unstable_corpus")]
+#[allow(missing_docs)]
+pub trait HasUnstableCorpus<I> {
+    type UnstableCorpus: Corpus<I>;
+
+    fn unstable_corpus(&self) -> &Self::UnstableCorpus;
+    fn unstable_corpus_mut(&mut self) -> &mut Self::UnstableCorpus;
+}
+
+#[cfg(not(feature = "unstable_corpus"))]
+#[allow(missing_docs)]
+pub trait HasUnstableCorpus<I> {}
+
 /// The trait that implements the very standard capability of a state.
 /// This state contains important information about the current run
 /// and can be used to restart the fuzzing process at any time.
@@ -223,6 +236,8 @@ pub struct StdState<C, I, R, SC> {
     corpus: C,
     // Solutions corpus
     solutions: SC,
+    #[cfg(feature = "unstable_corpus")]
+    unstable_corpus: SC,
     /// Metadata stored for this state by one of the components
     metadata: SerdeAnyMap,
     /// Metadata stored with names
@@ -293,6 +308,29 @@ where
         &mut self.corpus
     }
 }
+
+#[cfg(feature = "unstable_corpus")]
+impl<C, I, R, SC> HasUnstableCorpus<I> for StdState<C, I, R, SC>
+where
+    SC: Corpus<I>,
+{
+    type UnstableCorpus = SC;
+
+    /// Returns the corpus
+    #[inline]
+    fn unstable_corpus(&self) -> &Self::UnstableCorpus {
+        &self.unstable_corpus
+    }
+
+    /// Returns the mutable corpus
+    #[inline]
+    fn unstable_corpus_mut(&mut self) -> &mut Self::UnstableCorpus {
+        &mut self.unstable_corpus
+    }
+}
+
+#[cfg(not(feature = "unstable_corpus"))]
+impl<C, I, R, SC> HasUnstableCorpus<I> for StdState<C, I, R, SC> {}
 
 impl<C, I, R, SC> HasTestcase<I> for StdState<C, I, R, SC>
 where
@@ -1230,6 +1268,8 @@ where
         rand: R,
         corpus: C,
         solutions: SC,
+        #[cfg(feature = "unstable_corpus")]
+        unstable_corpus: SC,
         feedback: &mut F,
         objective: &mut O,
     ) -> Result<Self, Error>
@@ -1248,6 +1288,8 @@ where
             named_metadata: NamedSerdeAnyMap::default(),
             corpus,
             solutions,
+            #[cfg(feature = "unstable_corpus")]
+            unstable_corpus,
             max_size: DEFAULT_MAX_SIZE,
             stop_requested: false,
             #[cfg(feature = "introspection")]
@@ -1270,6 +1312,7 @@ where
     }
 }
 
+
 impl StdState<InMemoryCorpus<NopInput>, NopInput, StdRand, InMemoryCorpus<NopInput>> {
     /// Create an empty [`StdState`] that has very minimal uses.
     /// Potentially good for testing.
@@ -1280,6 +1323,8 @@ impl StdState<InMemoryCorpus<NopInput>, NopInput, StdRand, InMemoryCorpus<NopInp
         StdState::new(
             StdRand::with_seed(0),
             InMemoryCorpus::<NopInput>::new(),
+            InMemoryCorpus::new(),
+            #[cfg(feature = "unstable_corpus")]
             InMemoryCorpus::new(),
             &mut (),
             &mut (),
