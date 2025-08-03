@@ -28,9 +28,21 @@ mod arrays {
     use core::{convert::TryInto, marker::PhantomData};
 
     use serde::{
-        Deserialize, Deserializer,
         de::{SeqAccess, Visitor},
+        ser::SerializeTuple,
+        Deserialize, Deserializer, Serialize, Serializer,
     };
+
+    pub fn serialize<S: Serializer, T: Serialize, const N: usize>(
+        data: &[T; N],
+        ser: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut s = ser.serialize_tuple(N)?;
+        for item in data {
+            s.serialize_element(item)?;
+        }
+        s.end()
+    }
 
     struct ArrayVisitor<T, const N: usize>(PhantomData<T>);
 
@@ -888,9 +900,18 @@ impl<'a, T: 'a + Sized + Serialize, const N: usize> Serialize
         S: Serializer,
     {
         match self {
-            OwnedMutSizedSliceInner::RefRaw(rr, _) => unsafe { &**rr }.serialize(se),
-            OwnedMutSizedSliceInner::Ref(r) => (*r).serialize(se),
-            OwnedMutSizedSliceInner::Owned(b) => (*b).serialize(se),
+            OwnedMutSizedSliceInner::RefRaw(rr, _) => {
+                let data = unsafe { &**rr };
+                arrays::serialize(data, se)
+            }
+            OwnedMutSizedSliceInner::Ref(r) => {
+                let data = r;
+                arrays::serialize(data, se)
+            }
+            OwnedMutSizedSliceInner::Owned(b) => {
+                let data = b;
+                arrays::serialize(data, se)
+            }
         }
     }
 }
