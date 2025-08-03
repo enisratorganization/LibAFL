@@ -97,6 +97,11 @@ handle_sigpipe = []
 ## These are interesting as they could indicate bugs in target code such as OOBR
 unstable_corpus = []
 
+## Additional stability check when receiving a new Testcase Event
+## Background: When using Multiprocess fuzzing, the different fuzzers can have different seeds for the execution environment.
+## When testcases are sent to the others, re-calculating all observers and comparing might yield interesting insights
+stability_check_on_reception = ["unstable_corpus"]
+
 #! ## Additional Components
 
 ## Enables `TcpEventManager`, a simple EventManager proxying everything via TCP. This uses `tokio`.

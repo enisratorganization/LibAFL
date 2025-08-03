@@ -64,10 +64,22 @@ impl UnstableEntriesMetadata {
         &self.unstable_entries
     }
 
+    /// Setter
+    #[must_use]
+    pub fn unstable_entries_mut(&mut self) -> &mut HashSet<usize> {
+        &mut self.unstable_entries
+    }
+
     /// Getter
     #[must_use]
     pub fn filled_entries_count(&self) -> usize {
         self.filled_entries_count
+    }
+
+    ///Setter
+    #[must_use]
+    pub fn filled_entries_count_mut(&mut self) -> &mut usize {
+        &mut self.filled_entries_count
     }
 }
 

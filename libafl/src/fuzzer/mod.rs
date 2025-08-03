@@ -1,35 +1,42 @@
 //! The `Fuzzer` is the main struct for a fuzz campaign.
-
 use alloc::{string::ToString, vec::Vec};
 use core::{fmt::Debug, time::Duration};
 #[cfg(feature = "std")]
 use std::hash::Hash;
+use std::marker::PhantomData;
 
 #[cfg(feature = "std")]
 use fastbloom::BloomFilter;
-use libafl_bolts::{current_time, tuples::MatchName};
+#[allow(unused_imports)]
+use libafl_bolts::{
+    current_time,
+    tuples::{Handle, MatchName, RefIndexable},
+};
 use serde::{Serialize, de::DeserializeOwned};
 
 #[cfg(feature = "introspection")]
 use crate::monitors::stats::PerfFeature;
+#[allow(unused_imports)]
 use crate::{
     Error, HasMetadata,
     corpus::{Corpus, CorpusId, HasCurrentCorpusId, HasTestcase, Testcase},
     events::{
-        CanSerializeObserver, Event, EventConfig, EventFirer, EventReceiver, ProgressReporter,
-        RecordSerializationTime, SendExiting,
+        CanSerializeObserver, Event, EventConfig, EventFirer, EventReceiver, LogSeverity,
+        ProgressReporter, RecordSerializationTime, SendExiting,
     },
     executors::{Executor, ExitKind, HasObservers},
     feedbacks::Feedback,
     inputs::Input,
     mark_feature_time,
-    observers::ObserversTuple,
+    observers::{MapObserver, ConstMapObserver, ObserversTuple},
     schedulers::Scheduler,
     stages::StagesTuple,
+    stages::calibrate::UnstableEntriesMetadata,
     start_timer,
     state::{
         HasCorpus, HasCurrentStageId, HasCurrentTestcase, HasExecutions, HasImported,
-        HasLastFoundTime, HasLastReportTime, HasSolutions, MaybeHasClientPerfMonitor, Stoppable,
+        HasLastFoundTime, HasLastReportTime, HasSolutions, HasUnstableCorpus,
+        MaybeHasClientPerfMonitor, Stoppable,
     },
 };
 
@@ -258,14 +265,33 @@ pub enum ExecuteInputResult {
 
 /// Your default fuzzer instance, for everyday use.
 #[derive(Debug)]
-pub struct StdFuzzer<CS, F, IF, OF> {
+#[allow(dead_code)]
+pub struct StdFuzzer<CS, F, IF, OF, C , MF > {
     scheduler: CS,
     feedback: F,
     objective: OF,
     input_filter: IF,
+    #[cfg(feature = "stability_check_on_reception")]
+    map_handle_for_instability_check: Handle<C>,
+    _phantom: PhantomData<(C, MF)>,
 }
 
-impl<CS, F, I, IF, OF, S> HasScheduler<I, S> for StdFuzzer<CS, F, IF, OF>
+#[cfg(feature = "stability_check_on_reception")]
+macro_rules! StdFuzzerType {
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident) => {
+        StdFuzzer<$a, $b, $c, $d, $e, $f>
+    };
+}
+// insert fake "ConstMapObserver" concrete type for generics not used
+#[cfg(not(feature = "stability_check_on_reception"))]
+macro_rules! StdFuzzerType {
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident) => {
+        StdFuzzer<$a, $b, $c, $d, ConstMapObserver<'_,u8,0>, ConstMapObserver<'_,u8,0>>
+    };
+}
+
+
+impl<CS, F, I, IF, OF, S, C, MF> HasScheduler<I, S> for StdFuzzer<CS, F, IF, OF, C, MF>
 where
     CS: Scheduler<I, S>,
 {
@@ -280,7 +306,7 @@ where
     }
 }
 
-impl<CS, F, IF, OF> HasFeedback for StdFuzzer<CS, F, IF, OF> {
+impl<CS, F, IF, OF, C, MF> HasFeedback for StdFuzzer<CS, F, IF, OF, C, MF> {
     type Feedback = F;
 
     fn feedback(&self) -> &Self::Feedback {
@@ -292,7 +318,7 @@ impl<CS, F, IF, OF> HasFeedback for StdFuzzer<CS, F, IF, OF> {
     }
 }
 
-impl<CS, F, IF, OF> HasObjective for StdFuzzer<CS, F, IF, OF> {
+impl<CS, F, IF, OF, C, MF> HasObjective for StdFuzzer<CS, F, IF, OF, C, MF> {
     type Objective = OF;
 
     fn objective(&self) -> &OF {
@@ -304,7 +330,8 @@ impl<CS, F, IF, OF> HasObjective for StdFuzzer<CS, F, IF, OF> {
     }
 }
 
-impl<CS, EM, F, I, IF, OF, OT, S> ExecutionProcessor<EM, I, OT, S> for StdFuzzer<CS, F, IF, OF>
+impl<CS, EM, F, I, IF, OF, OT, S, C, MF> ExecutionProcessor<EM, I, OT, S>
+    for StdFuzzer<CS, F, IF, OF, C, MF>
 where
     CS: Scheduler<I, S>,
     EM: EventFirer<I, S> + CanSerializeObserver<OT>,
@@ -423,6 +450,7 @@ where
         // Now send off the event
         let observers_buf = match exec_res {
             ExecuteInputResult::Corpus => {
+                //log::debug!("should_send: {:?} config: {:?}", manager.should_send(), manager.configuration());
                 if manager.should_send() {
                     // TODO set None for fast targets
                     if manager.configuration() == EventConfig::AlwaysUnique {
@@ -436,6 +464,8 @@ where
             }
             _ => None,
         };
+
+        //log::debug!("OBSERVERS_BUF: {:?}", observers_buf);
 
         self.dispatch_event(state, manager, input, exec_res, observers_buf, exit_kind)?;
         Ok(())
@@ -510,7 +540,8 @@ where
     }
 }
 
-impl<CS, E, EM, F, I, IF, OF, S> EvaluatorObservers<E, EM, I, S> for StdFuzzer<CS, F, IF, OF>
+impl<CS, E, EM, F, I, IF, OF, S, C, MF> EvaluatorObservers<E, EM, I, S>
+    for StdFuzzer<CS, F, IF, OF, C, MF>
 where
     CS: Scheduler<I, S>,
     E: HasObservers + Executor<EM, I, S, Self>,
@@ -583,7 +614,7 @@ impl<I: Hash> InputFilter<I> for BloomInputFilter {
     }
 }
 
-impl<CS, E, EM, F, I, IF, OF, S> Evaluator<E, EM, I, S> for StdFuzzer<CS, F, IF, OF>
+impl<CS, E, EM, F, I, IF, OF, S, C, MF> Evaluator<E, EM, I, S> for StdFuzzer<CS, F, IF, OF, C, MF>
 where
     CS: Scheduler<I, S>,
     E: HasObservers + Executor<EM, I, S, Self>,
@@ -736,7 +767,8 @@ where
     }
 }
 
-impl<CS, E, EM, F, I, IF, OF, S> EventProcessor<E, EM, I, S> for StdFuzzer<CS, F, IF, OF>
+impl<CS, E, EM, F, I, IF, OF, S, C, MF> EventProcessor<E, EM, I, S>
+    for StdFuzzer<CS, F, IF, OF, C, MF>
 where
     CS: Scheduler<I, S>,
     E: HasObservers + Executor<EM, I, S, Self>,
@@ -754,7 +786,10 @@ where
         + HasLastFoundTime
         + MaybeHasClientPerfMonitor
         + HasCurrentCorpusId
-        + HasImported,
+        + HasImported
+        + HasUnstableCorpus<I>,
+    C: AsRef<MF>,
+    MF: MapObserver,
 {
     fn process_events(
         &mut self,
@@ -781,6 +816,10 @@ where
                             let dur = current_time() - start;
                             manager.set_deserialization_time(dur);
                         }
+
+                        #[cfg(feature = "stability_check_on_reception")]
+                        self.evaluate_stability(state, executor, manager, input, &observers)?;
+
                         let res = self.evaluate_execution(
                             state, manager, input, &observers, &exit_kind, false,
                         )?;
@@ -820,7 +859,8 @@ where
     }
 }
 
-impl<CS, E, EM, F, I, IF, OF, S, ST> Fuzzer<E, EM, I, S, ST> for StdFuzzer<CS, F, IF, OF>
+impl<CS, E, EM, F, I, IF, OF, S, ST, C, MF> Fuzzer<E, EM, I, S, ST>
+    for StdFuzzer<CS, F, IF, OF, C, MF>
 where
     CS: Scheduler<I, S>,
     E: HasObservers + Executor<EM, I, S, Self>,
@@ -834,6 +874,7 @@ where
         + HasMetadata
         + HasCorpus<I>
         + HasSolutions<I>
+        + HasUnstableCorpus<I>
         + HasLastReportTime
         + HasLastFoundTime
         + HasImported
@@ -843,6 +884,8 @@ where
         + Stoppable
         + MaybeHasClientPerfMonitor,
     ST: StagesTuple<E, EM, S, Self>,
+    MF: MapObserver,
+    C: AsRef<MF>
 {
     fn fuzz_one(
         &mut self,
@@ -952,27 +995,173 @@ where
     }
 }
 
-impl<CS, F, IF, OF> StdFuzzer<CS, F, IF, OF> {
+
+impl<CS, F, IF, OF, C, MF> 
+ StdFuzzer<CS, F, IF, OF, C, MF>
+{
     /// Create a new [`StdFuzzer`] with standard behavior and the provided duplicate input execution filter.
-    pub fn with_input_filter(scheduler: CS, feedback: F, objective: OF, input_filter: IF) -> Self {
+    pub fn with_input_filter(
+        scheduler: CS,
+        feedback: F,
+        objective: OF,
+        input_filter: IF,
+        #[cfg(feature = "stability_check_on_reception")] map_handle_for_instability_check: Handle<
+            C,
+        >,
+    ) -> Self {
         Self {
             scheduler,
             feedback,
             objective,
             input_filter,
+            #[cfg(feature = "stability_check_on_reception")]
+            map_handle_for_instability_check,
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<CS, F, OF> StdFuzzer<CS, F, NopInputFilter, OF> {
+#[cfg(feature = "stability_check_on_reception")]
+impl<CS, F, IF, OF, C, MF> StdFuzzer<CS, F, IF, OF, C, MF> {
+    /// Compare MapObservers for a single testcase. First observer is given as an argument, second observer comes from execution.
+    pub fn evaluate_stability<S, E, EM, I, OT>(
+        &mut self,
+        state: &mut S,
+        executor: &mut E,
+        manager: &mut EM,
+        input: &I,
+        observers: &OT,
+    ) -> Result<(), Error> where
+        E: HasObservers + Executor<EM, I, S, Self>,
+        E::Observers: DeserializeOwned + Serialize + ObserversTuple<I, S>,
+        I: Input,
+        EM: EventReceiver<I, S> + EventFirer<I, S>,
+        OT: ObserversTuple<I, S> + Serialize,
+        S: HasCorpus<I>
+            + MaybeHasClientPerfMonitor
+            + HasCurrentTestcase<I>
+            + HasSolutions<I>
+            + HasLastFoundTime
+            + HasUnstableCorpus<I>,
+        MF: MapObserver,
+        C: AsRef<MF>,
+    {
+        let index_observers =  RefIndexable::from(observers);
+        let map_first =
+            index_observers[&self.map_handle_for_instability_check].as_ref();
+        let map_first_entries = map_first.to_vec();
+
+        let map_first_filled_count = map_first.count_bytes().try_into()?;
+
+        let  start = current_time();
+
+        // Run once to get the initial calibration map
+        executor.observers_mut().pre_exec_all(state, &input)?;
+
+        let exit_kind = executor.run_target(self, state, manager, &input)?;
+        let _total_time = if exit_kind == ExitKind::Ok {
+            current_time() - start
+        } else {
+            manager.log(
+                state,
+                LogSeverity::Warn,
+                "Corpus entry errored on execution!".into(),
+            )?;
+            // assume one second as default time
+            Duration::from_secs(1)
+        };
+
+        executor
+            .observers_mut()
+            .post_exec_all(state, &input, &exit_kind)?;
+
+        let mut current_testcase_unstable_entries: Vec<usize> = vec![];
+
+        if exit_kind != ExitKind::Timeout {
+            let map = &executor.observers()[&self.map_handle_for_instability_check]
+                .as_ref()
+                .to_vec();
+
+            for (idx, (first, cur)) in map_first_entries.iter().zip(map.iter()).enumerate() {
+                if *first != *cur {
+                    current_testcase_unstable_entries.push(idx);
+                }
+            }
+        }
+
+        // Detect instability in environments with non-determinism. This might be due to 1. broken executor (guest) environment or 2. due to BUGs such as OOBR in the target software
+        if !current_testcase_unstable_entries.is_empty() {
+            let ratio =
+                current_testcase_unstable_entries.len() as f64 / map_first_filled_count as f64;
+            // Choose a threshold big enough to detect a  distinct control flow, not just some loop counts varying
+            if ratio > 0.01 && current_testcase_unstable_entries.len() > 20 {
+                manager.log(
+                    state,
+                    LogSeverity::Warn,
+                    "Severely unstable testcase found!".into(),
+                )?;
+                log::info!("Severely unstable testcase found: {}", ratio);
+
+                // instead, amend the testcase to enable later feedback on those metadata
+                let mut testcase = Testcase::new(input.clone());
+                // If the testcase doesn't have its own `SchedulerTestcaseMetadata`, create it.
+                let data = if let Ok(metadata) = testcase.metadata_mut::<UnstableEntriesMetadata>()
+                {
+                    metadata
+                } else {
+                    testcase.add_metadata(UnstableEntriesMetadata::new());
+                    testcase.metadata_mut::<UnstableEntriesMetadata>().unwrap()
+                };
+
+                for item in current_testcase_unstable_entries {
+                    data.unstable_entries_mut().insert(item); // Insert newly found items
+                }
+                *data.filled_entries_count_mut() = map_first_filled_count;
+
+                state.unstable_corpus_mut().add(testcase)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<
+    CS,
+    F,
+    OF,
+    #[cfg(feature = "stability_check_on_reception")] C,
+    #[cfg(feature = "stability_check_on_reception")] MF,
+> StdFuzzerType![CS, F, NopInputFilter, OF, C, MF]
+{
     /// Create a new [`StdFuzzer`] with standard behavior and no duplicate input execution filtering.
-    pub fn new(scheduler: CS, feedback: F, objective: OF) -> Self {
-        Self::with_input_filter(scheduler, feedback, objective, NopInputFilter)
+    pub fn new(
+        scheduler: CS,
+        feedback: F,
+        objective: OF,
+        #[cfg(feature = "stability_check_on_reception")] map_handle_for_instability_check: Handle<
+            C,
+        >,
+    ) -> Self {
+        Self::with_input_filter(
+            scheduler,
+            feedback,
+            objective,
+            NopInputFilter,
+            #[cfg(feature = "stability_check_on_reception")]
+            map_handle_for_instability_check,
+        )
     }
 }
 
 #[cfg(feature = "std")] // hashing requires std
-impl<CS, F, OF> StdFuzzer<CS, F, BloomInputFilter, OF> {
+impl<
+    CS,
+    F,
+    OF,
+    #[cfg(feature = "stability_check_on_reception")] C,
+    #[cfg(feature = "stability_check_on_reception")] MF,
+> StdFuzzerType![CS, F, BloomInputFilter, OF, C, MF]
+{
     /// Create a new [`StdFuzzer`], which, with a certain certainty, executes each input only once.
     ///
     /// This is achieved by hashing each input and using a bloom filter to differentiate inputs.
@@ -982,11 +1171,21 @@ impl<CS, F, OF> StdFuzzer<CS, F, BloomInputFilter, OF> {
         scheduler: CS,
         feedback: F,
         objective: OF,
+        #[cfg(feature = "stability_check_on_reception")] map_handle_for_instability_check: Handle<
+            C,
+        >,
         items_count: usize,
         fp_p: f64,
     ) -> Self {
         let input_filter = BloomInputFilter::new(items_count, fp_p);
-        Self::with_input_filter(scheduler, feedback, objective, input_filter)
+        Self::with_input_filter(
+            scheduler,
+            feedback,
+            objective,
+            input_filter,
+            #[cfg(feature = "stability_check_on_reception")]
+            map_handle_for_instability_check,
+        )
     }
 }
 
@@ -1002,7 +1201,7 @@ pub trait ExecutesInput<E, EM, I, S> {
     ) -> Result<ExitKind, Error>;
 }
 
-impl<CS, E, EM, F, I, IF, OF, S> ExecutesInput<E, EM, I, S> for StdFuzzer<CS, F, IF, OF>
+impl<CS, E, EM, F, I, IF, OF, S, C, MF> ExecutesInput<E, EM, I, S> for StdFuzzer<CS, F, IF, OF, C, MF>
 where
     CS: Scheduler<I, S>,
     E: Executor<EM, I, S, Self> + HasObservers,
