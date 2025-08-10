@@ -120,6 +120,7 @@ llmp_small_maps = ["alloc"]
 rustversion = { workspace = true }
 
 [dependencies]
+hex = "0.4"
 libafl_derive = { workspace = true, default-features = true, optional = true }
 static_assertions = { workspace = true }
 typeid = { workspace = true }

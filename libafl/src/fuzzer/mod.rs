@@ -28,7 +28,7 @@ use crate::{
     feedbacks::Feedback,
     inputs::Input,
     mark_feature_time,
-    observers::{MapObserver, ConstMapObserver, ObserversTuple},
+    observers::{ConstMapObserver, MapObserver, ObserversTuple},
     schedulers::Scheduler,
     stages::StagesTuple,
     stages::calibrate::UnstableEntriesMetadata,
@@ -266,7 +266,7 @@ pub enum ExecuteInputResult {
 /// Your default fuzzer instance, for everyday use.
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct StdFuzzer<CS, F, IF, OF, C , MF > {
+pub struct StdFuzzer<CS, F, IF, OF, C, MF> {
     scheduler: CS,
     feedback: F,
     objective: OF,
@@ -289,7 +289,6 @@ macro_rules! StdFuzzerType {
         StdFuzzer<$a, $b, $c, $d, ConstMapObserver<'_,u8,0>, ConstMapObserver<'_,u8,0>>
     };
 }
-
 
 impl<CS, F, I, IF, OF, S, C, MF> HasScheduler<I, S> for StdFuzzer<CS, F, IF, OF, C, MF>
 where
@@ -465,7 +464,10 @@ where
             _ => None,
         };
 
-        //log::debug!("OBSERVERS_BUF: {:?}", observers_buf);
+        /*if let Some(obs) = &observers_buf {
+            let p = format!("/tmp/l/{}.send.obs", current_time().as_nanos());
+            fs::write(p, obs)?;
+        }*/
 
         self.dispatch_event(state, manager, input, exec_res, observers_buf, exit_kind)?;
         Ok(())
@@ -741,6 +743,12 @@ where
         } else {
             manager.serialize_observers(&*observers)?
         };
+
+        /*if let Some(obs) = &observers_buf {
+            let p = format!("/tmp/l/{}.send.2obs", current_time().as_nanos());
+            fs::write(p, obs)?;
+        }*/
+
         manager.fire(
             state,
             Event::NewTestcase {
@@ -995,10 +1003,7 @@ where
     }
 }
 
-
-impl<CS, F, IF, OF, C, MF> 
- StdFuzzer<CS, F, IF, OF, C, MF>
-{
+impl<CS, F, IF, OF, C, MF> StdFuzzer<CS, F, IF, OF, C, MF> {
     /// Create a new [`StdFuzzer`] with standard behavior and the provided duplicate input execution filter.
     pub fn with_input_filter(
         scheduler: CS,
@@ -1031,7 +1036,8 @@ impl<CS, F, IF, OF, C, MF> StdFuzzer<CS, F, IF, OF, C, MF> {
         manager: &mut EM,
         input: &I,
         observers: &OT,
-    ) -> Result<(), Error> where
+    ) -> Result<(), Error>
+    where
         E: HasObservers + Executor<EM, I, S, Self>,
         E::Observers: DeserializeOwned + Serialize + ObserversTuple<I, S>,
         I: Input,
@@ -1046,14 +1052,13 @@ impl<CS, F, IF, OF, C, MF> StdFuzzer<CS, F, IF, OF, C, MF> {
         MF: MapObserver,
         C: AsRef<MF>,
     {
-        let index_observers =  RefIndexable::from(observers);
-        let map_first =
-            index_observers[&self.map_handle_for_instability_check].as_ref();
-        let map_first_entries = map_first.to_vec();
+        let index_observers = RefIndexable::from(observers);
+        let map_first = index_observers[&self.map_handle_for_instability_check].as_ref();
+        //let map_first_entries = map_first.to_vec();
 
         let map_first_filled_count = map_first.count_bytes().try_into()?;
 
-        let  start = current_time();
+        let start = current_time();
 
         // Run once to get the initial calibration map
         executor.observers_mut().pre_exec_all(state, &input)?;
@@ -1075,19 +1080,10 @@ impl<CS, F, IF, OF, C, MF> StdFuzzer<CS, F, IF, OF, C, MF> {
             .observers_mut()
             .post_exec_all(state, &input, &exit_kind)?;
 
-        let mut current_testcase_unstable_entries: Vec<usize> = vec![];
-
-        if exit_kind != ExitKind::Timeout {
-            let map = &executor.observers()[&self.map_handle_for_instability_check]
-                .as_ref()
-                .to_vec();
-
-            for (idx, (first, cur)) in map_first_entries.iter().zip(map.iter()).enumerate() {
-                if *first != *cur {
-                    current_testcase_unstable_entries.push(idx);
-                }
-            }
-        }
+        let current_testcase_unstable_entries: Vec<usize> = match exit_kind {
+            ExitKind::Timeout => Vec::new(),
+            _ => map_first.compare(executor.observers()[&self.map_handle_for_instability_check].as_ref())?,
+        };
 
         // Detect instability in environments with non-determinism. This might be due to 1. broken executor (guest) environment or 2. due to BUGs such as OOBR in the target software
         if !current_testcase_unstable_entries.is_empty() {
@@ -1112,12 +1108,7 @@ impl<CS, F, IF, OF, C, MF> StdFuzzer<CS, F, IF, OF, C, MF> {
                     testcase.add_metadata(UnstableEntriesMetadata::new());
                     testcase.metadata_mut::<UnstableEntriesMetadata>().unwrap()
                 };
-
-                for item in current_testcase_unstable_entries {
-                    data.unstable_entries_mut().insert(item); // Insert newly found items
-                }
-                *data.filled_entries_count_mut() = map_first_filled_count;
-
+                data.update(&current_testcase_unstable_entries, map_first_filled_count);
                 state.unstable_corpus_mut().add(testcase)?;
             }
         }
@@ -1201,7 +1192,8 @@ pub trait ExecutesInput<E, EM, I, S> {
     ) -> Result<ExitKind, Error>;
 }
 
-impl<CS, E, EM, F, I, IF, OF, S, C, MF> ExecutesInput<E, EM, I, S> for StdFuzzer<CS, F, IF, OF, C, MF>
+impl<CS, E, EM, F, I, IF, OF, S, C, MF> ExecutesInput<E, EM, I, S>
+    for StdFuzzer<CS, F, IF, OF, C, MF>
 where
     CS: Scheduler<I, S>,
     E: Executor<EM, I, S, Self> + HasObservers,

@@ -50,6 +50,7 @@ use typed_builder::TypedBuilder;
 use crate::events::COMPRESS_THRESHOLD;
 #[cfg(all(unix, not(miri)))]
 use crate::events::EVENTMGR_SIGHANDLER_STATE;
+#[allow(unused_imports)]
 use crate::{
     Error,
     common::HasMetadata,
@@ -58,7 +59,7 @@ use crate::{
         Event, EventConfig, EventFirer, EventManagerHooksTuple, EventManagerId, EventReceiver,
         EventRestarter, HasEventManagerId, LLMP_TAG_EVENT_TO_BOTH, LlmpShouldSaveState,
         ProgressReporter, RecordSerializationTime, SendExiting, StdLlmpEventHook,
-        launcher::ClientDescription, serialize_observers_adaptive, std_maybe_report_progress,
+        launcher::ClientDescription, std_maybe_report_progress, serialize_observers_adaptive,
         std_report_progress,
     },
     inputs::Input,
@@ -190,6 +191,9 @@ where
             Err(e) => return Err(Error::from(e)),
         };
 
+        //let p = format!("/tmp/l/{}.send", current_time().as_nanos());
+        //fs::write(p, &self.event_buffer[..written_len])?;
+
         #[cfg(feature = "llmp_compression")]
         {
             match self
@@ -197,6 +201,8 @@ where
                 .maybe_compress(&self.event_buffer[..written_len])
             {
                 Some(comp_buf) => {
+                    //let p = format!("/tmp/l/{}.send.comp", current_time().as_nanos());
+                    //fs::write(p, &comp_buf)?;
                     self.llmp.send_buf_with_flags(
                         LLMP_TAG_EVENT_TO_BOTH,
                         flags | LLMP_FLAG_COMPRESSED,
@@ -245,7 +251,11 @@ where
     SHM: ShMem,
 {
     fn serialize_observers(&mut self, observers: &OT) -> Result<Option<Vec<u8>>, Error> {
-        serialize_observers_adaptive::<Self, OT>(self, observers, 2, 80)
+        #[cfg(feature = "stability_check_on_reception")]
+        let ret = Ok(Some(postcard::to_allocvec(observers)?));
+        #[cfg(not(feature = "stability_check_on_reception"))]
+        let ret = serialize_observers_adaptive::<Self, OT>(self, observers, 2, 80);
+        ret
     }
 }
 
@@ -331,6 +341,9 @@ where
                 continue;
             }
 
+            //let p = format!("/tmp/l/{}.recv", current_time().as_nanos());
+            //fs::write(p, msg)?;
+
             #[cfg(not(feature = "llmp_compression"))]
             let event_bytes = msg;
             #[cfg(feature = "llmp_compression")]
@@ -342,6 +355,8 @@ where
             } else {
                 msg
             };
+            //let p = format!("/tmp/l/{}.recv.dec", current_time().as_nanos());
+            //fs::write(p, event_bytes)?;
 
             let event: Event<I> = postcard::from_bytes(event_bytes)?;
             log::debug!("Received event in normal llmp {}", event.name_detailed());
@@ -372,6 +387,8 @@ where
                     );
 
                     if client_config.match_with(&self.configuration) && observers_buf.is_some() {
+                        //let p = format!("/tmp/l/{}.recv.obs", current_time().as_nanos());
+                        //fs::write(p, observers_buf.as_ref().unwrap())?;
                         return Ok(Some((event, true)));
                     }
 

@@ -1,5 +1,5 @@
 //! The calibration stage. The fuzzer measures the average exec time and the bitmap size.
-
+use std::cmp;
 use alloc::{
     borrow::{Cow, ToOwned},
     string::ToString,
@@ -80,6 +80,14 @@ impl UnstableEntriesMetadata {
     #[must_use]
     pub fn filled_entries_count_mut(&mut self) -> &mut usize {
         &mut self.filled_entries_count
+    }
+
+    /// Update with more unstable edges found
+    pub fn update(&mut self, new_entries: &[usize], filled_count: usize) {
+        for item in new_entries {
+            self.unstable_entries.insert(*item);
+        }
+        self.filled_entries_count = cmp::max(self.filled_entries_count, filled_count);
     }
 }
 
