@@ -19,14 +19,14 @@ use libafl::{
     Error, HasMetadata,
     corpus::{Corpus, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::SimpleRestartingEventManager,
-    executors::{ExitKind, inprocess::InProcessExecutor},
+    executors::{ExitKind, ShadowExecutor, inprocess::InProcessExecutor},
     feedback_or,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
     inputs::{BytesInput, HasTargetBytes},
     monitors::SimpleMonitor,
     mutators::{
-        StdMOptMutator, StdScheduledMutator, Tokens, havoc_mutations,
+        HavocScheduledMutator, StdMOptMutator, Tokens, havoc_mutations,
         token_mutations::I2SRandReplace, tokens_mutations,
     },
     observers::{CanTrack, HitcountsMapObserver, TimeObserver},
@@ -34,7 +34,7 @@ use libafl::{
         IndexesLenTimeMinimizerScheduler, StdWeightedScheduler, powersched::PowerSchedule,
     },
     stages::{
-        StdMutationalStage, TracingStage, calibrate::CalibrationStage,
+        ShadowTracingStage, StdMutationalStage, calibrate::CalibrationStage,
         power::StdPowerMutationalStage,
     },
     state::{HasCorpus, StdState},
@@ -260,8 +260,7 @@ fn fuzz(
     let mut feedback = feedback_or!(
         // New maximization map feedback linked to the edges observer and the feedback state
         map_feedback,
-        // Time feedback, this one does not need a feedback state
-        TimeFeedback::new(&time_observer)
+        // CrashFeedback::new(),
     );
 
     // A feedback to choose if an input is a solution or not
@@ -296,7 +295,9 @@ fn fuzz(
     }
 
     // Setup a randomic Input2State stage
-    let i2s = StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
+    let i2s = StdMutationalStage::new(HavocScheduledMutator::new(tuple_list!(
+        I2SRandReplace::new()
+    )));
 
     // Setup a MOPT mutator
     let mutator = StdMOptMutator::new(
@@ -332,8 +333,6 @@ fn fuzz(
         ExitKind::Ok
     };
 
-    let mut tracing_harness = harness;
-
     // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
     let mut executor = InProcessExecutor::with_timeout(
         &mut harness,
@@ -344,18 +343,10 @@ fn fuzz(
         timeout,
     )?;
 
+    let mut executor = ShadowExecutor::new(executor, tuple_list!(cmplog_observer));
+
     // Setup a tracing stage in which we log comparisons
-    let tracing = TracingStage::new(
-        InProcessExecutor::with_timeout(
-            &mut tracing_harness,
-            tuple_list!(cmplog_observer),
-            &mut fuzzer,
-            &mut state,
-            &mut mgr,
-            timeout * 10,
-        )?,
-        // Give it more time!
-    );
+    let tracing = ShadowTracingStage::new();
 
     // The order of the stages matter!
     let mut stages = tuple_list!(calibration, tracing, i2s, power);

@@ -37,7 +37,7 @@ pub use sync::*;
 #[cfg(feature = "std")]
 pub use time_tracker::TimeTrackingStageWrapper;
 pub use tmin::{ObserverEqualityFactory, ObserverEqualityFeedback, StdTMinMutationalStage};
-pub use tracing::{ShadowTracingStage, TracingStage};
+pub use tracing::TracingStage;
 pub use tuneable::*;
 use tuple_list::NonEmptyTuple;
 #[cfg(feature = "unicode")]
@@ -57,6 +57,9 @@ pub mod mutational;
 pub mod push;
 pub mod tmin;
 
+pub mod shadow;
+pub use shadow::*;
+
 pub mod replay;
 pub use replay::*;
 
@@ -68,9 +71,11 @@ pub mod colorization;
 pub mod concolic;
 #[cfg(feature = "std")]
 pub mod dump;
+pub mod dynamic;
 pub mod generalization;
 pub mod generation;
 pub mod logics;
+pub mod nop;
 pub mod power;
 #[cfg(feature = "std")]
 pub mod sync;

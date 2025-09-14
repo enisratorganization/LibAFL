@@ -15,15 +15,17 @@ pub use unix_signals::CTRL_C_EXIT;
 pub mod pipes;
 
 #[cfg(all(unix, feature = "std"))]
-use alloc::borrow::Cow;
+use alloc::{borrow::Cow, ffi::CString};
 #[cfg(all(unix, feature = "std"))]
 use core::ffi::CStr;
 #[cfg(feature = "std")]
 use std::{env, process::Command};
 #[cfg(all(unix, feature = "std"))]
-use std::{ffi::CString, os::fd::RawFd};
-#[cfg(all(unix, feature = "std"))]
-use std::{fs::File, os::fd::AsRawFd, sync::OnceLock};
+use std::{
+    fs::File,
+    os::fd::{AsRawFd, RawFd},
+    sync::OnceLock,
+};
 
 // Allow a few extra features we need for the whole module
 #[cfg(all(windows, feature = "std"))]
@@ -46,6 +48,9 @@ pub struct ChildHandle {
     pub pid: pid_t,
 }
 
+/// The special exit code when the target signal handler is crashing recursively
+pub const SIGNAL_RECURSION_EXIT: i32 = 101;
+
 #[cfg(unix)]
 impl ChildHandle {
     /// Block until the child exited and the status code becomes available
@@ -53,7 +58,7 @@ impl ChildHandle {
     pub fn status(&self) -> i32 {
         let mut status = -1;
         unsafe {
-            libc::waitpid(self.pid, &mut status, 0);
+            libc::waitpid(self.pid, &raw mut status, 0);
         }
         libc::WEXITSTATUS(status)
     }

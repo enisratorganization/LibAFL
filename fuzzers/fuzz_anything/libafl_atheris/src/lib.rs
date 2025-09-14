@@ -14,7 +14,7 @@ use clap::{Arg, ArgAction, Command};
 use libafl::{
     corpus::{Corpus, InMemoryCorpus, OnDiskCorpus},
     events::{launcher::Launcher, EventConfig},
-    executors::{inprocess::InProcessExecutor, ExitKind},
+    executors::{inprocess::InProcessExecutor, ExitKind, ShadowExecutor},
     feedback_or,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
@@ -23,12 +23,12 @@ use libafl::{
     monitors::MultiMonitor,
     mutators::{
         havoc_mutations::havoc_mutations,
-        scheduled::{tokens_mutations, StdScheduledMutator},
+        scheduled::{tokens_mutations, HavocScheduledMutator},
         token_mutations::{I2SRandReplace, Tokens},
     },
     observers::{CanTrack, HitcountsMapObserver, StdMapObserver, TimeObserver},
     schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
-    stages::{StdMutationalStage, TracingStage},
+    stages::{ShadowTracingStage, StdMutationalStage, TracingStage},
     state::{HasCorpus, StdState},
     Error, HasMetadata,
 };
@@ -216,21 +216,17 @@ pub extern "C" fn LLVMFuzzerRunDriver(
             ExitKind::Ok
         };
 
+        let mut executor = ShadowExecutor::new(executor, tuple_list!(cmplog_observer));
         // Setup a tracing stage in which we log comparisons
-        let tracing = TracingStage::new(InProcessExecutor::new(
-            &mut harness,
-            tuple_list!(cmplog_observer),
-            &mut fuzzer,
-            &mut state,
-            &mut mgr,
-        )?);
+        let tracing = ShadowTracingStage::new();
 
         // Setup a randomic Input2State stage
-        let i2s =
-            StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
+        let i2s = StdMutationalStage::new(HavocScheduledMutator::new(tuple_list!(
+            I2SRandReplace::new()
+        )));
 
         // Setup a basic mutator
-        let mutator = StdScheduledMutator::new(havoc_mutations().merge(tokens_mutations()));
+        let mutator = HavocScheduledMutator::new(havoc_mutations().merge(tokens_mutations()));
         let mutational = StdMutationalStage::new(mutator);
 
         // The order of the stages matter!

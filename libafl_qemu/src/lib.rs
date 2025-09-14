@@ -16,6 +16,10 @@
 // This causes bindgen to generate empty Rust struct that are generally not FFI-safe due to C++ having empty structs with size 1
 // As the QEMU codebase is C, it is FFI-safe and we just ignore the warning
 #![allow(improper_ctypes)]
+// you don't build this without std
+#![allow(clippy::std_instead_of_core)]
+// same
+#![allow(clippy::std_instead_of_alloc)]
 
 use std::env;
 
@@ -94,7 +98,7 @@ pub fn python_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "usermode")]
     m.add_class::<GuestMaps>()?;
 
-    m.add_class::<SyscallHookResult>()?;
+    m.add_class::<pybind::SyscallHookResult>()?;
     m.add_class::<pybind::Qemu>()?;
 
     Ok(())

@@ -6,10 +6,6 @@ use crate::store_generated_content_if_different;
 
 const WRAPPER_HEADER: &str = r#"
 
-// https://github.com/rust-lang/rust-bindgen/issues/2500
-#define __AVX512VLFP16INTRIN_H
-#define __AVX512FP16INTRIN_H
-
 // QEMU_BUILD_BUG* cause an infinite recursion in bindgen when target is arm
 #include "qemu/compiler.h"
 
@@ -57,10 +53,9 @@ const WRAPPER_HEADER: &str = r#"
 #include "migration/savevm.h"
 #include "hw/core/sysemu-cpu-ops.h"
 #include "exec/address-spaces.h"
-#include "sysemu/tcg.h"
-#include "sysemu/runstate.h"
-#include "sysemu/replay.h"
-#include "sysemu/block-backend.h"
+#include "exec/target_page.h"
+#include "system/system.h"
+#include "system/block-backend.h"
 
 #include "libafl/system.h"
 #include "libafl/qemu_snapshot.h"
@@ -72,11 +67,9 @@ const WRAPPER_HEADER: &str = r#"
 #include "exec/cpu-common.h"
 #include "exec/cpu-all.h"
 #include "exec/exec-all.h"
-#include "exec/translate-all.h"
 #include "exec/log.h"
 #include "trace/trace-root.h"
 #include "qemu/accel.h"
-#include "hw/core/accel-cpu.h"
 
 #include "tcg/tcg.h"
 #include "tcg/tcg-op.h"
@@ -130,6 +123,7 @@ pub fn generate(
         .derive_default(true)
         .impl_debug(true)
         .generate_comments(true)
+        .wrap_static_fns(true)
         .default_enum_style(bindgen::EnumVariation::NewType {
             is_global: true,
             is_bitfield: true,
@@ -173,6 +167,7 @@ pub fn generate(
         .allowlist_function("qemu_plugin_hwaddr_phys_addr")
         .allowlist_function("qemu_plugin_get_hwaddr")
         .allowlist_function("qemu_target_page_size")
+        .allowlist_function("qemu_target_page_mask")
         .allowlist_function("syx_.*")
         .allowlist_function("device_list_all")
         .allowlist_function("libafl_.*")

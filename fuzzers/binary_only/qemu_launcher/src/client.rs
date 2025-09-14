@@ -2,23 +2,20 @@ use std::env;
 
 use libafl::{
     corpus::{InMemoryOnDiskCorpus, OnDiskCorpus},
-    events::ClientDescription,
+    events::{
+        ClientDescription, EventFirer, EventReceiver, EventRestarter, ProgressReporter, SendExiting,
+    },
     inputs::BytesInput,
-    monitors::Monitor,
     state::StdState,
     Error,
 };
 use libafl_bolts::{rands::StdRand, tuples::tuple_list};
 use libafl_qemu::modules::{
-    asan::AsanModule, asan_guest::AsanGuestModule, cmplog::CmpLogModule, DrCovModule,
-    InjectionModule,
+    asan::AsanModule, asan_guest::AsanGuestModule, cmplog::CmpLogModule,
+    utils::filters::StdAddressFilter, DrCovModule, InjectionModule,
 };
 
-use crate::{
-    harness::Harness,
-    instance::{ClientMgr, Instance},
-    options::FuzzerOptions,
-};
+use crate::{harness::Harness, instance::Instance, options::FuzzerOptions};
 
 #[expect(clippy::module_name_repetitions)]
 pub type ClientState =
@@ -51,12 +48,19 @@ impl Client<'_> {
     }
 
     #[expect(clippy::too_many_lines)]
-    pub fn run<M: Monitor>(
+    pub fn run<EM>(
         &self,
         state: Option<ClientState>,
-        mgr: ClientMgr<M>,
+        mgr: EM,
         client_description: ClientDescription,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        EM: EventFirer<BytesInput, ClientState>
+            + EventRestarter<ClientState>
+            + ProgressReporter<ClientState>
+            + SendExiting
+            + EventReceiver<BytesInput, ClientState>,
+    {
         let core_id = client_description.core_id();
         let mut args = self.args()?;
         Harness::edit_args(&mut args);
@@ -111,6 +115,17 @@ impl Client<'_> {
             .client_description(client_description)
             .extra_tokens(extra_tokens);
 
+        let asan_filter = if let Some(include_asan) = &self.options.include_asan {
+            log::info!("ASAN includes: {include_asan:#x?}");
+            StdAddressFilter::allow_list(include_asan.to_vec())
+        } else if let Some(exclude_asan) = &self.options.exclude_asan {
+            log::info!("ASAN excludes: {exclude_asan:#x?}");
+            StdAddressFilter::deny_list(exclude_asan.to_vec())
+        } else {
+            log::info!("ASAN no additional filter");
+            StdAddressFilter::default()
+        };
+
         if self.options.rerun_input.is_some() {
             if is_drcov {
                 // Special code path for re-running inputs with DrCov and Asan.
@@ -123,7 +138,23 @@ impl Client<'_> {
                             .filename(drcov.clone())
                             .full_trace(true)
                             .build(),
-                        unsafe { AsanModule::builder().env(&env).asan_report().build() }
+                        unsafe {
+                            AsanModule::builder()
+                                .env(&env)
+                                .filter(asan_filter)
+                                .asan_report()
+                                .build()
+                        }
+                    );
+
+                    instance_builder.build().run(args, modules, state)
+                } else if is_asan_guest {
+                    let modules = tuple_list!(
+                        DrCovModule::builder()
+                            .filename(drcov.clone())
+                            .full_trace(true)
+                            .build(),
+                        AsanGuestModule::new(&env, asan_filter),
                     );
 
                     instance_builder.build().run(args, modules, state)
@@ -136,8 +167,17 @@ impl Client<'_> {
                     instance_builder.build().run(args, modules, state)
                 }
             } else if is_asan {
-                let modules =
-                    tuple_list!(unsafe { AsanModule::builder().env(&env).asan_report().build() });
+                let modules = tuple_list!(unsafe {
+                    AsanModule::builder()
+                        .env(&env)
+                        .filter(asan_filter)
+                        .asan_report()
+                        .build()
+                });
+
+                instance_builder.build().run(args, modules, state)
+            } else if is_asan_guest {
+                let modules = tuple_list!(AsanGuestModule::new(&env, asan_filter));
 
                 instance_builder.build().run(args, modules, state)
             } else {
@@ -151,7 +191,7 @@ impl Client<'_> {
                     args,
                     tuple_list!(
                         CmpLogModule::default(),
-                        AsanModule::builder().env(&env).build(),
+                        AsanModule::builder().env(&env).filter(asan_filter).build(),
                         injection_module,
                     ),
                     state,
@@ -161,7 +201,7 @@ impl Client<'_> {
                     args,
                     tuple_list!(
                         CmpLogModule::default(),
-                        AsanModule::builder().env(&env).build()
+                        AsanModule::builder().env(&env).filter(asan_filter).build()
                     ),
                     state,
                 )
@@ -172,7 +212,7 @@ impl Client<'_> {
                     args,
                     tuple_list!(
                         CmpLogModule::default(),
-                        AsanGuestModule::default(&env),
+                        AsanGuestModule::new(&env, asan_filter),
                         injection_module
                     ),
                     state,
@@ -180,7 +220,10 @@ impl Client<'_> {
             } else {
                 instance_builder.build().run(
                     args,
-                    tuple_list!(CmpLogModule::default(), AsanGuestModule::default(&env),),
+                    tuple_list!(
+                        CmpLogModule::default(),
+                        AsanGuestModule::new(&env, asan_filter),
+                    ),
                     state,
                 )
             }
@@ -188,20 +231,25 @@ impl Client<'_> {
             if let Some(injection_module) = injection_module {
                 instance_builder.build().run(
                     args,
-                    tuple_list!(AsanModule::builder().env(&env).build(), injection_module),
+                    tuple_list!(
+                        AsanModule::builder().env(&env).filter(asan_filter).build(),
+                        injection_module
+                    ),
                     state,
                 )
             } else {
                 instance_builder.build().run(
                     args,
-                    tuple_list!(AsanModule::builder().env(&env).build()),
+                    tuple_list!(AsanModule::builder().env(&env).filter(asan_filter).build()),
                     state,
                 )
             }
         } else if is_asan_guest {
-            instance_builder
-                .build()
-                .run(args, tuple_list!(AsanGuestModule::default(&env)), state)
+            instance_builder.build().run(
+                args,
+                tuple_list!(AsanGuestModule::new(&env, asan_filter)),
+                state,
+            )
         } else if is_cmplog {
             if let Some(injection_module) = injection_module {
                 instance_builder.build().run(

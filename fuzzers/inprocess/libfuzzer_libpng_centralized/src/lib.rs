@@ -20,7 +20,7 @@ use libafl::{
     monitors::MultiMonitor,
     mutators::{
         havoc_mutations::havoc_mutations,
-        scheduled::{tokens_mutations, StdScheduledMutator},
+        scheduled::{tokens_mutations, HavocScheduledMutator},
         token_mutations::Tokens,
     },
     observers::{CanTrack, HitcountsMapObserver, TimeObserver},
@@ -196,7 +196,7 @@ pub extern "C" fn libafl_main() {
             }
 
             // Setup a basic mutator with a mutational stage
-            let mutator = StdScheduledMutator::new(havoc_mutations().merge(tokens_mutations()));
+            let mutator = HavocScheduledMutator::new(havoc_mutations().merge(tokens_mutations()));
             let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 
             // A minimization+queue policy to get testcasess from the corpus
@@ -216,18 +216,6 @@ pub extern "C" fn libafl_main() {
                 ExitKind::Ok
             };
 
-            // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
-            #[cfg(target_os = "linux")]
-            let mut executor = InProcessExecutor::batched_timeout(
-                &mut harness,
-                tuple_list!(edges_observer, time_observer),
-                &mut fuzzer,
-                &mut state,
-                &mut mgr,
-                opt.timeout,
-            )?;
-
-            #[cfg(not(target_os = "linux"))]
             let mut executor = InProcessExecutor::with_timeout(
                 &mut harness,
                 tuple_list!(edges_observer, time_observer),

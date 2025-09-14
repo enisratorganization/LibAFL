@@ -5,14 +5,15 @@ use core::{
     hash::{BuildHasher, Hasher},
     marker::PhantomData,
     mem::size_of,
-    ptr, slice,
+    ptr,
+    ptr::read_volatile,
+    slice,
 };
 use std::{
     env::temp_dir,
     fs::{self, File},
     io::{Read, Write},
     path::PathBuf,
-    ptr::read_volatile,
 };
 
 use ahash::RandomState;
@@ -50,7 +51,7 @@ impl StateShMemContent {
 
     /// Get a length that's safe to deref from this map, or error.
     pub fn buf_len_checked(&self, shmem_size: usize) -> Result<usize, Error> {
-        let buf_len = unsafe { read_volatile(&self.buf_len) };
+        let buf_len = unsafe { read_volatile(&raw const self.buf_len) };
         if size_of::<StateShMemContent>() + buf_len > shmem_size {
             Err(Error::illegal_state(format!(
                 "Stored buf_len is larger than the shared map! Shared data corrupted? Expected {shmem_size} bytes max, but got {} (buf_len {buf_len})",
@@ -140,9 +141,9 @@ where
                 return Err(Error::illegal_state(format!(
                     "The state restorer map is too small to fit anything, even the filename! 
                         It needs to be at least {} bytes. 
-                        The tmpfile was written to {:?}.",
+                        The tmpfile was written to {}.",
                     len,
-                    temp_dir().join(&filename)
+                    temp_dir().join(&filename).display()
                 )));
             }
 

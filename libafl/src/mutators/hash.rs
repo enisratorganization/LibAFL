@@ -1,6 +1,7 @@
 //! A wrapper around a [`Mutator`] that ensures an input really changed [`MutationResult::Mutated`]
 //! by hashing pre- and post-mutation
-use std::{borrow::Cow, hash::Hash};
+use alloc::borrow::Cow;
+use core::hash::Hash;
 
 use libafl_bolts::{Error, Named, generic_hash_std};
 
@@ -38,6 +39,14 @@ where
         } else {
             Ok(MutationResult::Mutated)
         }
+    }
+    #[inline]
+    fn post_exec(
+        &mut self,
+        state: &mut S,
+        new_corpus_id: Option<crate::corpus::CorpusId>,
+    ) -> Result<(), Error> {
+        self.inner.post_exec(state, new_corpus_id)
     }
 }
 

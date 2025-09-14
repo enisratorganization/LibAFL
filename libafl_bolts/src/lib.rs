@@ -5,10 +5,6 @@
 /*! */
 #![cfg_attr(feature = "document-features", doc = document_features::document_features!())]
 #![no_std]
-// For `type_eq`
-#![cfg_attr(nightly, feature(specialization))]
-// For `std::simd`
-#![cfg_attr(nightly, feature(portable_simd))]
 #![cfg_attr(not(test), warn(
     missing_debug_implementations,
     missing_docs,
@@ -112,6 +108,18 @@ pub mod subrange;
 #[cfg(any(feature = "xxh3", feature = "alloc"))]
 pub mod tuples;
 
+#[cfg(all(feature = "std", unix))]
+pub mod argparse;
+#[cfg(all(feature = "std", unix))]
+pub use argparse::*;
+
+#[cfg(all(feature = "std", unix))]
+pub mod target_args;
+#[cfg(all(feature = "std", unix))]
+pub use target_args::*;
+
+pub mod simd;
+
 /// The purpose of this module is to alleviate imports of the bolts by adding a glob import.
 #[cfg(feature = "prelude")]
 pub mod bolts_prelude {
@@ -140,18 +148,19 @@ pub mod bolts_prelude {
 #[cfg(all(unix, feature = "std"))]
 use alloc::boxed::Box;
 #[cfg(feature = "alloc")]
-use alloc::{borrow::Cow, vec::Vec};
+use alloc::{borrow::Cow, string::ToString, vec::Vec};
 #[cfg(all(not(feature = "xxh3"), feature = "alloc"))]
 use core::hash::BuildHasher;
 #[cfg(any(feature = "xxh3", feature = "alloc"))]
 use core::hash::{Hash, Hasher};
+#[cfg(all(unix, feature = "std"))]
+use core::mem;
 #[cfg(feature = "std")]
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(all(unix, feature = "std"))]
 use std::{
     fs::File,
     io::{Write, stderr, stdout},
-    mem,
     os::fd::{AsRawFd, FromRawFd, RawFd},
     panic,
 };
@@ -328,6 +337,8 @@ pub enum Error {
     InvalidCorpus(String, ErrorBacktrace),
     /// Error specific to a runtime like QEMU or Frida
     Runtime(String, ErrorBacktrace),
+    /// The `Input` was invalid.
+    InvalidInput(String, ErrorBacktrace),
 }
 
 impl Error {
@@ -354,6 +365,15 @@ impl Error {
         S: Into<String>,
     {
         Error::EmptyOptional(arg.into(), ErrorBacktrace::new())
+    }
+
+    /// The `Input` was invalid
+    #[must_use]
+    pub fn invalid_input<S>(reason: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Error::InvalidInput(reason.into(), ErrorBacktrace::new())
     }
 
     /// Key not in Map
@@ -565,6 +585,10 @@ impl Display for Error {
             }
             Self::Runtime(s, b) => {
                 write!(f, "Runtime error: {0}", &s)?;
+                display_error_backtrace(f, b)
+            }
+            Self::InvalidInput(s, b) => {
+                write!(f, "Encountered an invalid input: {0}", &s)?;
                 display_error_backtrace(f, b)
             }
         }
@@ -939,9 +963,72 @@ pub fn current_milliseconds() -> u64 {
 /// Format a `Duration` into a HMS string
 #[cfg(feature = "alloc")]
 #[must_use]
-pub fn format_duration_hms(duration: &time::Duration) -> String {
-    let secs = duration.as_secs();
-    format!("{}h-{}m-{}s", (secs / 60) / 60, (secs / 60) % 60, secs % 60)
+pub fn format_duration(duration: &time::Duration) -> String {
+    const MINS_PER_HOUR: u64 = 60;
+    const HOURS_PER_DAY: u64 = 24;
+
+    const SECS_PER_MINUTE: u64 = 60;
+    const SECS_PER_HOUR: u64 = SECS_PER_MINUTE * MINS_PER_HOUR;
+    const SECS_PER_DAY: u64 = SECS_PER_HOUR * HOURS_PER_DAY;
+
+    let total_secs = duration.as_secs();
+    let secs = total_secs % SECS_PER_MINUTE;
+
+    if total_secs < SECS_PER_MINUTE {
+        format!("{secs}s")
+    } else {
+        let mins = (total_secs / SECS_PER_MINUTE) % MINS_PER_HOUR;
+        if total_secs < SECS_PER_HOUR {
+            format!("{mins}m-{secs}s")
+        } else {
+            let hours = (total_secs / SECS_PER_HOUR) % HOURS_PER_DAY;
+            if total_secs < SECS_PER_DAY {
+                format!("{hours}h-{mins}m-{secs}s")
+            } else {
+                let days = total_secs / SECS_PER_DAY;
+                format!("{days}days {hours}h-{mins}m-{secs}s")
+            }
+        }
+    }
+}
+
+/// Format a number with thousands separators
+#[cfg(feature = "alloc")]
+#[must_use]
+pub fn format_big_number(val: u64) -> String {
+    let short = {
+        let (num, unit) = match val {
+            0..=999 => return format!("{val}"),
+            1_000..=999_999 => (1000, "K"),
+            1_000_000..=999_999_999 => (1_000_000, "M"),
+            1_000_000_000..=999_999_999_999 => (1_000_000_000, "G"),
+            _ => (1_000_000_000_000, "T"),
+        };
+        let main = val / num;
+        let frac = (val % num) / (num / 100);
+        format!(
+            "{}.{}{}",
+            main,
+            format!("{frac:02}").trim_end_matches('0'),
+            unit
+        )
+    };
+    let long = val
+        .to_string()
+        .chars()
+        .rev()
+        .enumerate()
+        .fold(String::new(), |mut acc, (i, c)| {
+            if i > 0 && i % 3 == 0 {
+                acc.push(',');
+            }
+            acc.push(c);
+            acc
+        })
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{short} ({long})")
 }
 
 /// Stderr logger
@@ -989,7 +1076,7 @@ impl SimpleStdoutLogger {
 #[must_use]
 /// Return thread ID without using TLS
 pub fn get_thread_id() -> u64 {
-    use std::arch::asm;
+    use core::arch::asm;
     #[cfg(target_arch = "x86_64")]
     unsafe {
         let teb: *const u8;
@@ -1030,7 +1117,7 @@ pub fn get_thread_id() -> u64 {
 #[cfg(feature = "std")]
 #[cfg(target_os = "windows")]
 mod windows_logging {
-    use std::ptr;
+    use core::ptr;
 
     use once_cell::sync::OnceCell;
     use winapi::um::{
@@ -1061,7 +1148,7 @@ mod windows_logging {
         // Get the handle to standard output
         let h_stdout: HANDLE = get_stdout_handle();
 
-        if h_stdout == INVALID_HANDLE_VALUE {
+        if ptr::addr_eq(h_stdout, INVALID_HANDLE_VALUE) {
             eprintln!("Failed to get standard output handle");
             return;
         }
@@ -1075,7 +1162,7 @@ mod windows_logging {
                 h_stdout,
                 bytes.as_ptr() as *const _,
                 bytes.len() as u32,
-                &mut bytes_written,
+                &raw mut bytes_written,
                 ptr::null_mut(),
             )
         };
@@ -1290,7 +1377,7 @@ struct TEB {
 #[inline(always)]
 #[cfg(target_os = "windows")]
 fn nt_current_teb() -> *mut TEB {
-    use std::arch::asm;
+    use core::arch::asm;
     let teb: *mut TEB;
     unsafe {
         asm!("mov {}, gs:0x30", out(reg) teb);

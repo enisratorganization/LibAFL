@@ -6,14 +6,14 @@ even if the target would not have crashed under normal conditions.
 this helps finding mem errors early.
 */
 
-use core::fmt::{self, Debug, Formatter};
-use std::{
+use alloc::rc::Rc;
+use core::{
     cell::Cell,
     ffi::{c_char, c_void},
+    fmt::{self, Debug, Formatter},
     ptr::write_volatile,
-    rc::Rc,
-    sync::{Mutex, MutexGuard},
 };
+use std::sync::{Mutex, MutexGuard};
 
 use backtrace::Backtrace;
 use dynasmrt::{DynasmApi, DynasmLabelApi, dynasm};
@@ -47,7 +47,7 @@ use crate::utils::{AccessType, operand_details};
 #[cfg(target_arch = "aarch64")]
 use crate::utils::{instruction_width, writer_register};
 use crate::{
-    alloc::Allocator,
+    allocator::Allocator,
     asan::errors::{ASAN_ERRORS, AsanError, AsanErrors, AsanReadWriteError},
     helper::{FridaRuntime, SkipRange},
     utils::disas_count,
@@ -95,7 +95,7 @@ impl Default for AsanInHookGuard {
 /// This is a simple way to prevent reentrancy in the hooks when we don't have TLS.
 /// This is not a perfect solution, as it is global so it orders all threads without TLS.
 /// However, this is a rare situation and should not affect performance significantly.
-use std::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 #[derive(Debug)]
 struct Lock {
@@ -527,10 +527,7 @@ impl AsanRuntime {
         });
 
         if start == 0 {
-            log::error!(
-                "range_for_address: no range found for address {:#x}",
-                address
-            );
+            log::error!("range_for_address: no range found for address {address:#x}");
         }
         (start, end)
     }
@@ -547,7 +544,7 @@ impl AsanRuntime {
         // Write something to (hopefully) make sure the val isn't optimized out
 
         unsafe {
-            write_volatile(&mut stack_var, 0xfadbeef);
+            write_volatile(&raw mut stack_var, 0xfadbeef);
         }
 
         let range = Self::range_for_address(stack_address);
@@ -612,7 +609,7 @@ impl AsanRuntime {
 
                     static [<$name:snake:upper _PTR>]: std::sync::OnceLock<extern "C" fn($($param: $param_type),*) -> $return_type> = std::sync::OnceLock::new();
 
-                    let _ = [<$name:snake:upper _PTR>].set(unsafe {std::mem::transmute::<*const c_void, extern "C" fn($($param: $param_type),*) -> $return_type>(target_function.0)}).unwrap();
+                    let _ = [<$name:snake:upper _PTR>].set(unsafe {core::mem::transmute::<*const c_void, extern "C" fn($($param: $param_type),*) -> $return_type>(target_function.0)}).unwrap();
 
                     #[allow(non_snake_case)]
                     unsafe extern "C" fn [<replacement_ $name>]($($param: $param_type),*) -> $return_type {
@@ -662,7 +659,7 @@ impl AsanRuntime {
 
                     static [<$lib_ident:snake:upper _ $name:snake:upper _PTR>]: std::sync::OnceLock<extern "C" fn($($param: $param_type),*) -> $return_type> = std::sync::OnceLock::new();
 
-                    let _ = [<$lib_ident:snake:upper _ $name:snake:upper _PTR>].set(unsafe {std::mem::transmute::<*const c_void, extern "C" fn($($param: $param_type),*) -> $return_type>(target_function.0)}).unwrap();
+                    let _ = [<$lib_ident:snake:upper _ $name:snake:upper _PTR>].set(unsafe {core::mem::transmute::<*const c_void, extern "C" fn($($param: $param_type),*) -> $return_type>(target_function.0)}).unwrap();
 
                     #[allow(non_snake_case)]
                     unsafe extern "C" fn [<replacement_ $name>]($($param: $param_type),*) -> $return_type {
@@ -707,7 +704,7 @@ impl AsanRuntime {
                     log::warn!("Hooking {} = {:?}", stringify!($name), target_function.0);
                     static [<$name:snake:upper _PTR>]: std::sync::OnceLock<extern "C" fn($($param: $param_type),*) -> $return_type> = std::sync::OnceLock::new();
 
-                    let _ = [<$name:snake:upper _PTR>].set(unsafe {std::mem::transmute::<*const c_void, extern "C" fn($($param: $param_type),*) -> $return_type>(target_function.0)}).unwrap_or_else(|e| println!("{:?}", e));
+                    let _ = [<$name:snake:upper _PTR>].set(unsafe {core::mem::transmute::<*const c_void, extern "C" fn($($param: $param_type),*) -> $return_type>(target_function.0)}).unwrap_or_else(|e| println!("{:?}", e));
 
                     #[allow(non_snake_case)] // depends on the values the macro is invoked with
                     #[allow(clippy::redundant_else)]
@@ -1522,14 +1519,14 @@ impl AsanRuntime {
 
         let instructions: Vec<Instruction> = disas_count(
             &decoder,
-            unsafe { std::slice::from_raw_parts(actual_pc as *mut u8, 24) },
+            unsafe { core::slice::from_raw_parts(actual_pc as *mut u8, 24) },
             3,
         );
 
         let insn = instructions[0]; // This is the very instruction that has triggered fault
         log::info!(
             "Fault Instruction: {}",
-            insn.display_with(DisplayStyle::Intel).to_string()
+            insn.display_with(DisplayStyle::Intel)
         );
         let operand_count = insn.operand_count();
 
@@ -1697,7 +1694,7 @@ impl AsanRuntime {
 
         let insn = disas_count(
             &decoder,
-            unsafe { std::slice::from_raw_parts(actual_pc as *mut u8, 4) },
+            unsafe { core::slice::from_raw_parts(actual_pc as *mut u8, 4) },
             1,
         )[0];
 
@@ -2478,7 +2475,7 @@ impl AsanRuntime {
         let result = frida_to_cs(decoder, instr);
 
         if let Err(e) = result {
-            log::error!("{}", e);
+            log::error!("{e}");
             return None;
         }
 
@@ -2520,7 +2517,7 @@ impl AsanRuntime {
 
                         // println!("{:#?} {:#?} {:#?}", cs_instr, cs_instr.to_string(), operand);
                         // println!("{:#?}", (memsz, basereg, indexreg, scale, disp));
-                        log::trace!("ASAN Interesting operand {:#?}", operand);
+                        log::trace!("ASAN Interesting operand {operand:#?}");
                         log::trace!("{:#?}", (memsz, basereg, indexreg, scale, disp));
                         return Some((memsz, basereg, indexreg, scale, disp));
                     }
@@ -2699,7 +2696,7 @@ impl AsanRuntime {
                 writer.put_nop();
             }
         } else {
-            log::trace!("Cannot check instructions for {:?} bytes.", width);
+            log::trace!("Cannot check instructions for {width:?} bytes.");
         }
 
         writer.put_pop_reg(X86Register::Rdi);

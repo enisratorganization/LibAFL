@@ -1,8 +1,13 @@
 target
 target-bin
 out
-Cargo.lock
 vendor
+
+# cargo lockfiles except from binaries
+Cargo.lock
+./**/Cargo.lock
+# Un-ignore Cargo.lock files within the fuzzers directory
+!./fuzzers/**/Cargo.lock
 
 .DS_Store
 .env
@@ -29,6 +34,7 @@ cur_input
 .venv
 
 crashes
+corpus
 
 callgrind.out.*
 perf.data
@@ -76,3 +82,18 @@ program
 fuzzer_libpng*
 
 *.patch
+
+# Sometimes this happens
+rustc-ice-*
+
+# perf files
+*.mm_profdata
+
+# backup files
+*.bak
+
+# log
+log
+
+# Coredumps
+*.core

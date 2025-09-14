@@ -19,7 +19,7 @@ use content_inspector::inspect;
 use libafl::{
     corpus::{Corpus, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::SimpleRestartingEventManager,
-    executors::{inprocess::InProcessExecutor, ExitKind},
+    executors::{inprocess::InProcessExecutor, ExitKind, ShadowExecutor},
     feedback_or,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
@@ -32,7 +32,7 @@ use libafl::{
         },
         havoc_mutations,
         token_mutations::I2SRandReplace,
-        tokens_mutations, StdMOptMutator, StdScheduledMutator, Tokens,
+        tokens_mutations, HavocScheduledMutator, StdMOptMutator, Tokens,
     },
     observers::{CanTrack, HitcountsMapObserver, TimeObserver},
     schedulers::{
@@ -40,7 +40,7 @@ use libafl::{
     },
     stages::{
         calibrate::CalibrationStage, power::StdPowerMutationalStage, GeneralizationStage,
-        StdMutationalStage, TracingStage,
+        ShadowTracingStage, StdMutationalStage,
     },
     state::{HasCorpus, StdState},
     Error, HasMetadata,
@@ -364,7 +364,9 @@ fn fuzz_binary(
     }
 
     // Setup a randomic Input2State stage
-    let i2s = StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
+    let i2s = StdMutationalStage::new(HavocScheduledMutator::new(tuple_list!(
+        I2SRandReplace::new()
+    )));
 
     // Setup a MOPT mutator
     let mutator = StdMOptMutator::new(
@@ -400,8 +402,6 @@ fn fuzz_binary(
         ExitKind::Ok
     };
 
-    let mut tracing_harness = harness;
-
     // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
     let mut executor = InProcessExecutor::with_timeout(
         &mut harness,
@@ -413,14 +413,9 @@ fn fuzz_binary(
     )?;
 
     // Setup a tracing stage in which we log comparisons
-    let tracing = TracingStage::new(InProcessExecutor::with_timeout(
-        &mut tracing_harness,
-        tuple_list!(cmplog_observer),
-        &mut fuzzer,
-        &mut state,
-        &mut mgr,
-        timeout * 10,
-    )?);
+    let mut executor = ShadowExecutor::new(executor, tuple_list!(cmplog_observer));
+
+    let tracing = ShadowTracingStage::new();
 
     // The order of the stages matter!
     let mut stages = tuple_list!(calibration, tracing, i2s, power);
@@ -579,7 +574,9 @@ fn fuzz_text(
     }
 
     // Setup a randomic Input2State stage
-    let i2s = StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
+    let i2s = StdMutationalStage::new(HavocScheduledMutator::new(tuple_list!(
+        I2SRandReplace::new()
+    )));
 
     // Setup a MOPT mutator
     let mutator = StdMOptMutator::new(
@@ -592,7 +589,7 @@ fn fuzz_text(
     let power: StdPowerMutationalStage<_, _, BytesInput, _, _, _> =
         StdPowerMutationalStage::new(mutator);
 
-    let grimoire_mutator = StdScheduledMutator::with_max_stack_pow(
+    let grimoire_mutator = HavocScheduledMutator::with_max_stack_pow(
         tuple_list!(
             GrimoireExtensionMutator::new(),
             GrimoireRecursiveReplacementMutator::new(),
@@ -632,8 +629,6 @@ fn fuzz_text(
         ExitKind::Ok
     };
 
-    let mut tracing_harness = harness;
-
     let generalization = GeneralizationStage::new(&edges_observer);
 
     // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
@@ -646,15 +641,8 @@ fn fuzz_text(
         timeout,
     )?;
     // Setup a tracing stage in which we log comparisons
-    let tracing = TracingStage::new(InProcessExecutor::with_timeout(
-        &mut tracing_harness,
-        tuple_list!(cmplog_observer),
-        &mut fuzzer,
-        &mut state,
-        &mut mgr,
-        // Give it more time!
-        timeout * 10,
-    )?);
+    let mut executor = ShadowExecutor::new(executor, tuple_list!(cmplog_observer));
+    let tracing = ShadowTracingStage::new();
 
     // The order of the stages matter!
     let mut stages = tuple_list!(generalization, calibration, tracing, i2s, power, grimoire);

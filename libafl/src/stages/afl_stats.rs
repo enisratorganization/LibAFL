@@ -1,9 +1,7 @@
 //! Stage to compute and report AFL++ stats
-use alloc::{string::String, vec::Vec};
-use core::{marker::PhantomData, time::Duration};
+use alloc::{borrow::Cow, string::String, vec::Vec};
+use core::{fmt::Display, marker::PhantomData, time::Duration};
 use std::{
-    borrow::Cow,
-    fmt::Display,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -25,7 +23,7 @@ use crate::feedbacks::{CRASH_FEEDBACK_NAME, TIMEOUT_FEEDBACK_NAME};
 use crate::{
     Error, HasMetadata, HasNamedMetadata, HasScheduler,
     corpus::{Corpus, HasCurrentCorpusId, SchedulerTestcaseMetadata, Testcase},
-    events::{Event, EventFirer},
+    events::{Event, EventFirer, EventWithStats},
     executors::HasObservers,
     monitors::stats::{AggregatorOps, UserStats, UserStatsValue},
     mutators::Tokens,
@@ -119,7 +117,7 @@ pub struct AflStatsStage<C, E, EM, I, O, S, Z> {
 
 /// AFL++'s `fuzzer_stats`
 #[derive(Debug, Clone)]
-pub struct AFLFuzzerStats<'a> {
+pub struct AflFuzzerStats<'a> {
     /// unix time indicating the start time of afl-fuzz
     start_time: u64,
     /// unix time corresponding to the last interval
@@ -322,7 +320,7 @@ where
         } else {
             0
         };
-        let stats = AFLFuzzerStats {
+        let stats = AflFuzzerStats {
             start_time: self.start_time,
             last_update: self.last_report_time.as_secs(),
             run_time: self.last_report_time.as_secs() - self.start_time,
@@ -412,7 +410,7 @@ where
             "{{\
                 \"pending\":{},\
                 \"pending_fav\":{},\
-                \"own_finds:\"{},\
+                \"own_finds\":{},\
                 \"imported\":{}\
             }}",
             stats.pending_total, stats.pending_favs, stats.corpus_found, stats.corpus_imported
@@ -420,14 +418,17 @@ where
 
         manager.fire(
             state,
-            Event::UpdateUserStats {
-                name: Cow::Borrowed("AflStats"),
-                value: UserStats::new(
-                    UserStatsValue::String(Cow::Owned(json)),
-                    AggregatorOps::None,
-                ),
-                phantom: PhantomData,
-            },
+            EventWithStats::with_current_time(
+                Event::UpdateUserStats {
+                    name: Cow::Borrowed("AflStats"),
+                    value: UserStats::new(
+                        UserStatsValue::String(Cow::Owned(json)),
+                        AggregatorOps::None,
+                    ),
+                    phantom: PhantomData,
+                },
+                *state.executions(),
+            ),
         )?;
 
         Ok(())
@@ -459,7 +460,7 @@ where
     }
 
     /// Writes a stats file, if a `stats_file_path` is set.
-    fn maybe_write_fuzzer_stats(&self, stats: &AFLFuzzerStats) -> Result<(), Error> {
+    fn maybe_write_fuzzer_stats(&self, stats: &AflFuzzerStats) -> Result<(), Error> {
         if let Some(stats_file_path) = &self.stats_file_path {
             let tmp_file = stats_file_path
                 .parent()
@@ -563,7 +564,7 @@ where
 }
 
 impl Display for AFLPlotData<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{},", self.relative_time)?;
         write!(f, "{},", self.cycles_done)?;
         write!(f, "{},", self.cur_item)?;
@@ -585,8 +586,8 @@ impl AFLPlotData<'_> {
         "# relative_time, cycles_done, cur_item, corpus_count, pending_total, pending_favs, total_edges, saved_crashes, saved_hangs, max_depth, execs_per_sec, execs_done, edges_found"
     }
 }
-impl Display for AFLFuzzerStats<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for AflFuzzerStats<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         writeln!(f, "start_time        : {}", &self.start_time)?;
         writeln!(f, "start_time        : {}", &self.start_time)?;
         writeln!(f, "last_update       : {}", &self.last_update)?;

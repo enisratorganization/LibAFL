@@ -1,4 +1,6 @@
 //! Signal handling for unix
+#[cfg(feature = "std")]
+use alloc::ffi::CString;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
@@ -13,8 +15,6 @@ use core::{
     fmt::{self, Display, Formatter},
     mem,
 };
-#[cfg(feature = "std")]
-use std::ffi::CString;
 
 /// armv7 `libc` does not feature a `uncontext_t` implementation
 #[cfg(target_arch = "arm")]
@@ -524,7 +524,7 @@ pub unsafe fn setup_signal_handler<T: 'static + SignalHandler>(
 pub fn ucontext() -> Result<ucontext_t, Error> {
     let mut ucontext = unsafe { mem::zeroed() };
     if cfg!(not(any(target_os = "openbsd", target_os = "haiku"))) {
-        if unsafe { getcontext(&mut ucontext) } == 0 {
+        if unsafe { getcontext(&raw mut ucontext) } == 0 {
             Ok(ucontext)
         } else {
             #[cfg(not(feature = "std"))]

@@ -111,7 +111,7 @@
     )
 )]
 
-use std::ffi::{c_char, c_int};
+use core::ffi::{c_char, c_int};
 
 pub use libfuzzer_sys::*;
 
@@ -127,6 +127,7 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+#[allow(missing_copy_implementations, missing_docs)]
 #[cfg(all(
     feature = "embed-runtime",
     target_family = "unix",

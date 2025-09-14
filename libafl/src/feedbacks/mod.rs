@@ -46,6 +46,8 @@ pub mod map;
 pub mod nautilus;
 #[cfg(feature = "std")]
 pub mod new_hash_feedback;
+#[cfg(feature = "simd")]
+pub mod simd;
 #[cfg(feature = "std")]
 pub mod stdio;
 pub mod transferred;
@@ -146,12 +148,6 @@ pub trait Feedback<EM, I, OT, S>: StateInitializer<S> + Named {
         _observers: &OT,
         _testcase: &mut Testcase<I>,
     ) -> Result<(), Error> {
-        Ok(())
-    }
-
-    /// Discard the stored metadata in case that the testcase is not added to the corpus
-    #[inline]
-    fn discard_metadata(&mut self, _state: &mut S, _input: &I) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -305,12 +301,6 @@ where
             .append_metadata(state, manager, observers, testcase)?;
         self.second
             .append_metadata(state, manager, observers, testcase)
-    }
-
-    #[inline]
-    fn discard_metadata(&mut self, state: &mut S, input: &I) -> Result<(), Error> {
-        self.first.discard_metadata(state, input)?;
-        self.second.discard_metadata(state, input)
     }
 }
 
@@ -669,11 +659,6 @@ where
     ) -> Result<(), Error> {
         self.inner
             .append_metadata(state, manager, observers, testcase)
-    }
-
-    #[inline]
-    fn discard_metadata(&mut self, state: &mut S, input: &I) -> Result<(), Error> {
-        self.inner.discard_metadata(state, input)
     }
 }
 

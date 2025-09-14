@@ -12,17 +12,18 @@
 //! On `Unix` systems, the [`Launcher`] will use `fork` if the `fork` feature is used for `LibAFL`.
 //! Else, it will start subsequent nodes with the same commandline, and will set special `env` variables accordingly.
 
+use alloc::string::String;
 use core::{
     fmt::{self, Debug, Formatter},
+    net::SocketAddr,
     num::NonZeroUsize,
     time::Duration,
 };
-use std::{net::SocketAddr, string::String};
 
 use libafl_bolts::{
     core_affinity::{CoreId, Cores},
     shmem::ShMemProvider,
-    tuples::{Handle, tuple_list},
+    tuples::tuple_list,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use typed_builder::TypedBuilder;
@@ -32,13 +33,13 @@ use {
         events::{CentralizedLlmpHook, StdLlmpEventHook, centralized::CentralizedEventManager},
         inputs::Input,
     },
+    alloc::boxed::Box,
     alloc::string::ToString,
     libafl_bolts::{
         core_affinity::get_core_ids,
         llmp::{Broker, Brokers, LlmpBroker},
         os::{ForkResult, fork},
     },
-    std::boxed::Box,
 };
 #[cfg(unix)]
 use {
@@ -57,7 +58,6 @@ use crate::{
         llmp::{LlmpRestartingEventManager, LlmpShouldSaveState, ManagerKind, RestartingMgr},
     },
     monitors::Monitor,
-    observers::TimeObserver,
 };
 
 /// The (internal) `env` that indicates we're running as client.
@@ -171,9 +171,6 @@ pub struct Launcher<'a, CF, MT, SP> {
     /// clusters.
     #[builder(default = None)]
     remote_broker_addr: Option<SocketAddr>,
-    /// The time observer for addaptive serialization
-    #[builder(default = None)]
-    time_ref: Option<Handle<TimeObserver>>,
     /// If this launcher should spawn a new `broker` on `[Self::broker_port]` (default).
     /// The reason you may not want this is, if you already have a [`Launcher`]
     /// with a different configuration (for the same target) running on this machine.
@@ -273,7 +270,7 @@ where
         // Spawn clients
         let mut index = 0_usize;
         for bind_to in core_ids {
-            if self.cores.ids.iter().any(|&x| x == bind_to) {
+            if self.cores.ids.contains(&bind_to) {
                 for overcommit_id in 0..self.overcommit {
                     index += 1;
                     self.shmem_provider.pre_fork()?;
@@ -324,7 +321,6 @@ where
                                 .configuration(self.configuration)
                                 .serialize_state(self.serialize_state)
                                 .hooks(hooks);
-                            let builder = builder.time_ref(self.time_ref.clone());
                             let (state, mgr) = builder.build().launch()?;
 
                             return (self.run_client.take().unwrap())(
@@ -353,8 +349,6 @@ where
                 .serialize_state(self.serialize_state)
                 .hooks(hooks);
 
-            let builder = builder.time_ref(self.time_ref.clone());
-
             builder.build().launch()?;
 
             // Broker exited. kill all clients.
@@ -372,7 +366,7 @@ where
                     "Not spawning broker (spawn_broker is false). Waiting for fuzzer children to exit..."
                 );
                 unsafe {
-                    libc::waitpid(*handle, &mut status, 0);
+                    libc::waitpid(*handle, &raw mut status, 0);
                     if status != 0 {
                         log::info!("Client with pid {handle} exited with status {status}");
                     }
@@ -416,8 +410,6 @@ where
                     .serialize_state(self.serialize_state)
                     .hooks(hooks);
 
-                let builder = builder.time_ref(self.time_ref.clone());
-
                 let (state, mgr) = builder.build().launch()?;
 
                 return (self.run_client.take().unwrap())(state, mgr, client_description);
@@ -455,7 +447,7 @@ where
                 //spawn clients
                 let mut index = 0;
                 for core_id in core_ids {
-                    if self.cores.ids.iter().any(|&x| x == core_id) {
+                    if self.cores.ids.contains(&core_id) {
                         for overcommit_i in 0..self.overcommit {
                             index += 1;
                             // Forward own stdio to child processes, if requested by user
@@ -522,8 +514,6 @@ where
                 .serialize_state(self.serialize_state)
                 .hooks(hooks);
 
-            let builder = builder.time_ref(self.time_ref.clone());
-
             builder.build().launch()?;
 
             //broker exited. kill all clients.
@@ -572,8 +562,6 @@ pub struct CentralizedLauncher<'a, CF, MF, MT, SP> {
     #[builder(default = 1338_u16)]
     centralized_broker_port: u16,
     /// The time observer by which to adaptively serialize
-    #[builder(default = None)]
-    time_obs: Option<Handle<TimeObserver>>,
     /// The list of cores to run on
     cores: &'a Cores,
     /// The number of clients to spawn on each core
@@ -678,8 +666,6 @@ where
                     .serialize_state(centralized_launcher.serialize_state)
                     .hooks(tuple_list!());
 
-                let builder = builder.time_ref(centralized_launcher.time_obs.clone());
-
                 builder.build().launch()
             };
 
@@ -747,7 +733,7 @@ where
         // Spawn clients
         let mut index = 0_usize;
         for bind_to in core_ids {
-            if self.cores.ids.iter().any(|&x| x == bind_to) {
+            if self.cores.ids.contains(&bind_to) {
                 for overcommit_id in 0..self.overcommit {
                     index += 1;
                     self.shmem_provider.pre_fork()?;
@@ -802,7 +788,6 @@ where
                                     // tuple_list!(multi_machine_event_manager_hook.take().unwrap()),
                                     self.shmem_provider.clone(),
                                     self.centralized_broker_port,
-                                    self.time_obs.clone(),
                                 )?;
 
                                 self.main_run_client.take().unwrap()(
@@ -828,7 +813,6 @@ where
                                     mgr,
                                     self.shmem_provider.clone(),
                                     self.centralized_broker_port,
-                                    self.time_obs.clone(),
                                 )?;
 
                                 self.secondary_run_client.take().unwrap()(

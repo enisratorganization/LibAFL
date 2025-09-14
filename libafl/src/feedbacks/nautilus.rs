@@ -25,7 +25,7 @@ pub struct NautilusChunksMetadata {
 }
 
 impl Debug for NautilusChunksMetadata {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "NautilusChunksMetadata {{ {} }}",
@@ -115,9 +115,6 @@ where
         self.append_nautilus_metadata_to_state(state, testcase)
     }
 
-    fn discard_metadata(&mut self, _state: &mut S, _input: &NautilusInput) -> Result<(), Error> {
-        Ok(())
-    }
     #[cfg(feature = "track_hit_feedbacks")]
     fn last_result(&self) -> Result<bool, Error> {
         Ok(false)

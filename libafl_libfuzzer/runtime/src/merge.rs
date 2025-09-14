@@ -1,7 +1,7 @@
+use std::{env::temp_dir, ffi::c_int, fs::rename};
+#[cfg(unix)]
 use std::{
-    env::temp_dir,
-    ffi::c_int,
-    fs::{File, rename},
+    fs::File,
     io::Write,
     os::fd::{AsRawFd, FromRawFd},
 };
@@ -95,7 +95,6 @@ pub fn merge(
         }
     }
 
-    #[expect(clippy::deref_addrof)]
     let edges = unsafe { core::mem::take(&mut *(counters_maps_ptr_mut())) };
     let edges_observer = MultiMapObserver::new("edges", edges);
 

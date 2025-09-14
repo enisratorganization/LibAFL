@@ -1,18 +1,18 @@
 //! Implements a mini-bsod generator.
 //! It dumps all important registers and prints a stacktrace.
 
+#[cfg(unix)]
+use alloc::vec::Vec;
 #[cfg(any(target_vendor = "apple", target_os = "openbsd"))]
 use core::mem::size_of;
 use std::io::{BufWriter, Write};
 #[cfg(any(target_os = "solaris", target_os = "illumos"))]
 use std::process::Command;
-#[cfg(unix)]
-use std::vec::Vec;
 
 #[cfg(unix)]
 use libc::siginfo_t;
 #[cfg(target_vendor = "apple")]
-use mach::{
+use mach2::{
     message::mach_msg_type_number_t,
     port::mach_port_t,
     traps::mach_task_self,
@@ -999,7 +999,7 @@ fn write_minibsod<W: Write>(writer: &mut BufWriter<W>) -> Result<(), std::io::Er
 
 #[cfg(target_vendor = "apple")]
 fn write_minibsod<W: Write>(writer: &mut BufWriter<W>) -> Result<(), std::io::Error> {
-    let mut ptask = std::mem::MaybeUninit::<mach_port_t>::uninit();
+    let mut ptask = core::mem::MaybeUninit::<mach_port_t>::uninit();
     // We start by the lowest virtual address from the userland' standpoint
     let mut addr: mach_vm_address_t = 0;
     let mut _cnt: mach_msg_type_number_t = 0;
@@ -1014,7 +1014,7 @@ fn write_minibsod<W: Write>(writer: &mut BufWriter<W>) -> Result<(), std::io::Er
     let task = unsafe { ptask.assume_init() };
 
     loop {
-        let mut pvminfo = std::mem::MaybeUninit::<vm_region_submap_info_64>::uninit();
+        let mut pvminfo = core::mem::MaybeUninit::<vm_region_submap_info_64>::uninit();
         _cnt = mach_msg_type_number_t::try_from(
             size_of::<vm_region_submap_info_64>() / size_of::<natural_t>(),
         )
@@ -1022,11 +1022,11 @@ fn write_minibsod<W: Write>(writer: &mut BufWriter<W>) -> Result<(), std::io::Er
         r = unsafe {
             mach_vm_region_recurse(
                 task,
-                &mut addr,
-                &mut sz,
-                &mut reg,
+                &raw mut addr,
+                &raw mut sz,
+                &raw mut reg,
                 pvminfo.as_mut_ptr() as vm_region_recurse_info_t,
-                &mut _cnt,
+                &raw mut _cnt,
             )
         };
         if r != libc::KERN_SUCCESS {

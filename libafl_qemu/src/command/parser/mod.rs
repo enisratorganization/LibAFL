@@ -12,7 +12,7 @@ use crate::{
         LoadCommand, LqprintfCommand, NativeExitKind, SaveCommand, StartCommand, StdCommandManager,
         TestCommand, VersionCommand, bindings,
     },
-    modules::{EmulatorModuleTuple, utils::filters::HasAddressFilterTuples},
+    modules::{EmulatorModuleTuple, utils::filters::HasStdFiltersTuple},
     sync_exit::ExitArgs,
 };
 
@@ -77,7 +77,8 @@ where
         qemu: Qemu,
         arch_regs_map: &'static EnumMap<ExitArgs, Regs>,
     ) -> Result<Self::OutputCommand, CommandError> {
-        let input_virt_addr: GuestVirtAddr = qemu.read_reg(arch_regs_map[ExitArgs::Arg1])?.into();
+        let input_virt_addr: GuestVirtAddr =
+            qemu.read_reg(arch_regs_map[ExitArgs::Arg1])? as GuestVirtAddr;
         let max_input_size: GuestReg = qemu.read_reg(arch_regs_map[ExitArgs::Arg2])?;
 
         Ok(InputCommand::new(
@@ -92,7 +93,7 @@ pub struct StartPhysCommandParser;
 impl<C, ET, I, S, SM> NativeCommandParser<C, StdCommandManager<S>, StdEmulatorDriver, ET, I, S, SM>
     for StartPhysCommandParser
 where
-    ET: EmulatorModuleTuple<I, S> + HasAddressFilterTuples,
+    ET: EmulatorModuleTuple<I, S> + HasStdFiltersTuple,
     I: HasTargetBytes + Unpin,
     S: Unpin,
     SM: IsSnapshotManager,
@@ -121,7 +122,7 @@ pub struct StartVirtCommandParser;
 impl<C, ET, I, S, SM> NativeCommandParser<C, StdCommandManager<S>, StdEmulatorDriver, ET, I, S, SM>
     for StartVirtCommandParser
 where
-    ET: EmulatorModuleTuple<I, S> + HasAddressFilterTuples,
+    ET: EmulatorModuleTuple<I, S> + HasStdFiltersTuple,
     I: HasTargetBytes + Unpin,
     S: Unpin,
     SM: IsSnapshotManager,
@@ -134,7 +135,8 @@ where
         qemu: Qemu,
         arch_regs_map: &'static EnumMap<ExitArgs, Regs>,
     ) -> Result<Self::OutputCommand, CommandError> {
-        let input_virt_addr: GuestVirtAddr = qemu.read_reg(arch_regs_map[ExitArgs::Arg1])?.into();
+        let input_virt_addr: GuestVirtAddr =
+            qemu.read_reg(arch_regs_map[ExitArgs::Arg1])? as GuestVirtAddr;
         let max_input_size: GuestReg = qemu.read_reg(arch_regs_map[ExitArgs::Arg2])?;
 
         Ok(StartCommand::new(QemuMemoryChunk::virt(
@@ -242,7 +244,7 @@ pub struct VaddrFilterAllowRangeCommandParser;
 impl<C, CM, ED, ET, I, S, SM> NativeCommandParser<C, CM, ED, ET, I, S, SM>
     for VaddrFilterAllowRangeCommandParser
 where
-    ET: EmulatorModuleTuple<I, S> + HasAddressFilterTuples,
+    ET: EmulatorModuleTuple<I, S> + HasStdFiltersTuple,
     I: Unpin,
     S: Unpin,
 {

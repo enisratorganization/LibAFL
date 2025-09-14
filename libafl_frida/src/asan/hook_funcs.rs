@@ -1,11 +1,11 @@
 //! The allocator hooks for address sanitizer.
-use std::ffi::c_void;
+use core::ffi::c_void;
 
 use backtrace::Backtrace;
 use libc::{c_char, wchar_t};
 
 use crate::{
-    alloc::Allocator,
+    allocator::Allocator,
     asan::{
         asan_rt::AsanRuntime,
         errors::{AsanError, AsanErrors},
@@ -21,7 +21,7 @@ unsafe extern "system" {
     fn memset(s: *mut c_void, c: i32, n: usize) -> *mut c_void;
 }
 
-use std::ptr;
+use core::ptr;
 
 #[cfg(windows)]
 use winapi::um::memoryapi::VirtualQuery;
@@ -837,7 +837,7 @@ impl AsanRuntime {
 
     #[expect(non_snake_case)]
     #[allow(unknown_lints)] // the compiler is contradicting itself
-    #[expect(clippy::used_underscore_items)]
+    #[allow(clippy::used_underscore_items)]
     #[inline]
     pub fn hook__Znwm(
         &mut self,
@@ -874,7 +874,7 @@ impl AsanRuntime {
 
     #[expect(non_snake_case)]
     #[allow(unknown_lints)] // the compiler is contradicting itself
-    #[expect(clippy::used_underscore_items)]
+    #[allow(clippy::used_underscore_items)]
     #[inline]
     pub fn hook__ZnwmSt11align_val_t(
         &mut self,
@@ -1610,7 +1610,7 @@ impl AsanRuntime {
     ) -> *mut c_void {
         log::trace!("hook_mmap");
         let res = original(addr, length, prot, flags, fd, offset);
-        if res != (-1_isize as *mut c_void) {
+        if !ptr::addr_eq(res, ptr::null_mut::<c_void>().wrapping_sub(1)) {
             self.allocator_mut()
                 .map_shadow_for_region(res as usize, res as usize + length, true);
         }
@@ -2371,7 +2371,7 @@ impl AsanRuntime {
         {
             panic!("ASAN: Crashing target!");
         }
-        let mn = std::cmp::min(n, unsafe { strlen(src) } + 1);
+        let mn = core::cmp::min(n, unsafe { strlen(src) } + 1);
         if !self.allocator_mut().check_shadow(src as *const c_void, mn)
             && AsanErrors::get_mut_blocking().report_error(AsanError::BadFuncArgRead((
                 "strncpy".to_string(),

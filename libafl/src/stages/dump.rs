@@ -1,12 +1,14 @@
 //! The [`DumpToDiskStage`] is a stage that dumps the corpus and the solutions to disk to e.g. allow AFL to sync
 
-use alloc::vec::Vec;
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::{clone::Clone, marker::PhantomData};
 use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    string::{String, ToString},
 };
 
 use libafl_bolts::impl_serdeany;
@@ -137,7 +139,7 @@ where
             if !corpus_dir.is_dir() {
                 return Err(Error::os_error(
                     e,
-                    format!("Error creating directory {corpus_dir:?}"),
+                    format!("Error creating directory {}", corpus_dir.display()),
                 ));
             }
         }
@@ -146,7 +148,7 @@ where
             if !solutions_dir.is_dir() {
                 return Err(Error::os_error(
                     e,
-                    format!("Error creating directory {solutions_dir:?}"),
+                    format!("Error creating directory {}", solutions_dir.display()),
                 ));
             }
         }

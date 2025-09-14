@@ -194,7 +194,7 @@ impl ShMemId {
     #[cfg(feature = "alloc")]
     #[must_use]
     pub fn as_str(&self) -> &str {
-        alloc::str::from_utf8(&self.id[..self.null_pos()]).unwrap()
+        core::str::from_utf8(&self.id[..self.null_pos()]).unwrap()
     }
 }
 
@@ -715,6 +715,8 @@ pub mod unix_shmem {
             shm_fd: c_int,
         }
 
+        unsafe impl Send for MmapShMem {}
+
         impl MmapShMem {
             /// Create a new [`MmapShMem`]
             ///
@@ -771,7 +773,7 @@ pub mod unix_shmem {
                         shm_fd,
                         0,
                     );
-                    if map == libc::MAP_FAILED || map.is_null() {
+                    if ptr::addr_eq(map, libc::MAP_FAILED) {
                         close(shm_fd);
                         shm_unlink(filename_path.as_ptr() as *const _);
                         return Err(Error::last_os_error(format!(
@@ -845,7 +847,7 @@ pub mod unix_shmem {
                             shm_fd,
                             0,
                         );
-                        if map == libc::MAP_FAILED || map.is_null() {
+                        if ptr::addr_eq(map, libc::MAP_FAILED) {
                             close(shm_fd);
                             return Err(Error::last_os_error(format!(
                                 "mmap() failed for map with fd {shm_fd:?}"
@@ -1036,6 +1038,8 @@ pub mod unix_shmem {
             map_size: usize,
         }
 
+        unsafe impl Send for CommonUnixShMem {}
+
         impl CommonUnixShMem {
             /// Create a new shared memory mapping, using shmget/shmat
             pub fn new(map_size: usize) -> Result<Self, Error> {
@@ -1081,7 +1085,7 @@ pub mod unix_shmem {
                     let id_int: i32 = id.into();
                     let map = shmat(id_int, ptr::null(), 0) as *mut c_uchar;
 
-                    if map.is_null() || map == ptr::null_mut::<c_uchar>().wrapping_sub(1) {
+                    if ptr::addr_eq(map, ptr::null_mut::<c_uchar>().wrapping_sub(1)) {
                         return Err(Error::last_os_error(format!(
                             "Failed to map the shared mapping with id {id_int}"
                         )));
@@ -1165,12 +1169,11 @@ pub mod unix_shmem {
     /// Module containing `ashmem` shared memory support, commonly used on Android.
     #[cfg(all(any(target_os = "linux", target_os = "android"), feature = "std"))]
     pub mod ashmem {
-        use alloc::string::ToString;
+        use alloc::{ffi::CString, string::ToString};
         use core::{
             ops::{Deref, DerefMut},
             ptr, slice,
         };
-        use std::ffi::CString;
 
         use libc::{
             MAP_SHARED, O_RDWR, PROT_READ, PROT_WRITE, c_uint, c_ulong, c_void, close, ioctl, mmap,
@@ -1189,6 +1192,8 @@ pub mod unix_shmem {
             map: *mut u8,
             map_size: usize,
         }
+
+        unsafe impl Send for AshmemShMem {}
 
         #[allow(non_camel_case_types)] // expect somehow breaks here
         #[derive(Copy, Clone)]
@@ -1251,7 +1256,7 @@ pub mod unix_shmem {
                         fd,
                         0,
                     );
-                    if map == usize::MAX as *mut c_void {
+                    if ptr::addr_eq(map, usize::MAX as *mut c_void) {
                         close(fd);
                         return Err(Error::unknown(
                             "Failed to map the ashmem mapping".to_string(),
@@ -1286,7 +1291,7 @@ pub mod unix_shmem {
                         fd,
                         0,
                     );
-                    if map == usize::MAX as *mut c_void {
+                    if ptr::addr_eq(map, usize::MAX as *mut c_void) {
                         close(fd);
                         return Err(Error::unknown(
                             "Failed to map the ashmem mapping".to_string(),
@@ -1386,16 +1391,14 @@ pub mod unix_shmem {
         any(target_os = "linux", target_os = "android", target_os = "freebsd")
     ))]
     pub mod memfd {
-        use alloc::string::ToString;
+        use alloc::{ffi::CString, string::ToString};
         use core::{
             ops::{Deref, DerefMut},
             ptr, slice,
         };
-        use std::{ffi::CString, os::fd::IntoRawFd};
+        use std::{fs::File, os::fd::IntoRawFd};
 
-        use libc::{
-            MAP_SHARED, PROT_READ, PROT_WRITE, c_void, close, fstat, ftruncate, mmap, munmap,
-        };
+        use libc::{MAP_SHARED, PROT_READ, PROT_WRITE, close, fstat, ftruncate, mmap, munmap};
         use nix::sys::memfd::{MemFdCreateFlag, memfd_create};
 
         use crate::{
@@ -1411,6 +1414,8 @@ pub mod unix_shmem {
             map: *mut u8,
             map_size: usize,
         }
+
+        unsafe impl Send for MemfdShMem {}
 
         impl MemfdShMem {
             /// Create a new shared memory mapping, using shmget/shmat
@@ -1437,7 +1442,7 @@ pub mod unix_shmem {
                         fd,
                         0,
                     );
-                    if map == usize::MAX as *mut c_void {
+                    if ptr::addr_eq(map, libc::MAP_FAILED) {
                         close(fd);
                         return Err(Error::unknown(
                             "Failed to map the memfd mapping".to_string(),
@@ -1454,8 +1459,8 @@ pub mod unix_shmem {
             fn shmem_from_id_and_size(id: ShMemId, map_size: usize) -> Result<Self, Error> {
                 let fd = i32::from(id);
                 unsafe {
-                    let mut stat = std::mem::zeroed();
-                    if fstat(fd, &mut stat) == -1 {
+                    let mut stat = core::mem::zeroed();
+                    if fstat(fd, &raw mut stat) == -1 {
                         return Err(Error::unknown(
                             "Failed to map the memfd mapping".to_string(),
                         ));
@@ -1474,7 +1479,7 @@ pub mod unix_shmem {
                         fd,
                         0,
                     );
-                    if map == usize::MAX as *mut c_void {
+                    if ptr::addr_eq(map, libc::MAP_FAILED) {
                         return Err(Error::last_os_error(format!(
                             "mmap() failed for map with fd {fd:?}"
                         )));
@@ -1533,6 +1538,21 @@ pub mod unix_shmem {
         impl Default for MemfdShMemProvider {
             fn default() -> Self {
                 Self::new().unwrap()
+            }
+        }
+
+        /// Dedicated Implementation to yield a [`std::fs::File`]
+        #[cfg(unix)]
+        impl MemfdShMemProvider {
+            /// Unlike [`MemfdShMemProvider::new`], this returns a file instead, without any mmap and truncate.
+            /// By default, the file size is capped by the tmpfs installed by the operating system, which is big
+            /// enough to hold all output and avoid spurious read/write errors from children. However, you are free
+            /// to set the size via [`std::fs::File::set_len`]
+            pub fn new_file() -> Result<File, Error> {
+                Ok(File::from(memfd_create(
+                    c"libafl_file",
+                    MemFdCreateFlag::empty(),
+                )?))
             }
         }
 
@@ -1599,6 +1619,8 @@ pub mod win32_shmem {
         map: *mut u8,
         map_size: usize,
     }
+
+    unsafe impl Send for Win32ShMem {}
 
     impl Debug for Win32ShMem {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -1880,11 +1902,11 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(miri, ignore)]
     fn test_persist_shmem() -> Result<(), Error> {
+        use alloc::string::ToString;
         use core::ffi::CStr;
         use std::{
             env,
             process::{Command, Stdio},
-            string::ToString,
         };
 
         use crate::shmem::{MmapShMemProvider, ShMem as _, ShMemId};

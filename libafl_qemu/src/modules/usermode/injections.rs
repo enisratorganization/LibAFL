@@ -346,13 +346,13 @@ where
 }
 
 impl HasAddressFilter for InjectionModule {
-    type ModuleAddressFilter = NopAddressFilter;
+    type AddressFilter = NopAddressFilter;
 
-    fn address_filter(&self) -> &Self::ModuleAddressFilter {
+    fn address_filter(&self) -> &Self::AddressFilter {
         &NopAddressFilter
     }
 
-    fn address_filter_mut(&mut self) -> &mut Self::ModuleAddressFilter {
+    fn address_filter_mut(&mut self) -> &mut Self::AddressFilter {
         unsafe { (&raw mut NOP_ADDRESS_FILTER).as_mut().unwrap().get_mut() }
     }
 }
@@ -400,13 +400,13 @@ where
 
             let first_parameter = unsafe {
                 if (*c_array.offset(1)).is_null() {
-                    return SyscallHookResult::new(None);
+                    return SyscallHookResult::Run;
                 }
                 CStr::from_ptr(*c_array.offset(1)).to_string_lossy()
             };
             let second_parameter = unsafe {
                 if (*c_array.offset(2)).is_null() {
-                    return SyscallHookResult::new(None);
+                    return SyscallHookResult::Run;
                 }
                 CStr::from_ptr(*c_array.offset(2)).to_string_lossy()
             };
@@ -419,9 +419,9 @@ where
 
             //println!("PARAMETERS First {} Second {}", first_parameter, second_
         }
-        SyscallHookResult::new(Some(0))
+        SyscallHookResult::Skip(0)
     } else {
-        SyscallHookResult::new(None)
+        SyscallHookResult::Run
     }
 }
 

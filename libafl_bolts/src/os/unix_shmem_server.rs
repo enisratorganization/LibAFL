@@ -5,26 +5,29 @@ Hence, the `unix_shmem_server` keeps track of existing maps, creates new maps fo
 and forwards them over unix domain sockets.
 */
 
+use alloc::{
+    rc::{Rc, Weak},
+    sync::Arc,
+};
 #[cfg(feature = "std")]
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
 use core::{
+    cell::RefCell,
     fmt::Debug,
+    marker::PhantomData,
     mem::ManuallyDrop,
     ops::{Deref, DerefMut},
 };
 #[cfg(target_vendor = "apple")]
 use std::fs;
 use std::{
-    cell::RefCell,
     env,
     io::{Read, Write},
-    marker::PhantomData,
     os::fd::{AsFd, BorrowedFd},
-    rc::{Rc, Weak},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Condvar, Mutex},
     thread::JoinHandle,
 };
 #[cfg(all(feature = "std", unix))]
@@ -496,7 +499,7 @@ where
         // log::trace!("got ashmem client: {}, request:{:?}", client_id, request);
 
         // Handle the client request
-        let response = match request {
+        match request {
             ServedShMemRequest::Hello() => Ok(ServedShMemResponse::Id(client_id)),
             ServedShMemRequest::PreFork() => {
                 // We clone the provider already, waiting for it to reconnect [`PostFork`].
@@ -587,12 +590,10 @@ where
             ServedShMemRequest::Exit => {
                 log::info!("ShMemService - Exiting");
                 // stopping the server
-                return Err(Error::shutting_down());
+                Err(Error::shutting_down())
             }
-        };
+        }
         // log::info!("send ashmem client: {}, response: {:?}", client_id, &response);
-
-        response
     }
 
     fn read_request(&mut self, client_id: RawFd) -> Result<ServedShMemRequest, Error> {

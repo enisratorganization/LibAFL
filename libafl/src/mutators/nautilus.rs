@@ -19,7 +19,7 @@ use crate::{
     generators::nautilus::NautilusContext,
     inputs::nautilus::NautilusInput,
     mutators::{MutationResult, Mutator},
-    state::{HasCorpus, HasRand},
+    state::HasRand,
 };
 
 /// The randomic mutator for `Nautilus` grammar.
@@ -29,7 +29,7 @@ pub struct NautilusRandomMutator<'a> {
 }
 
 impl Debug for NautilusRandomMutator<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "NautilusRandomMutator {{}}")
     }
 }
@@ -62,6 +62,14 @@ impl<S: HasRand> Mutator<NautilusInput, S> for NautilusRandomMutator<'_> {
             Ok(MutationResult::Mutated)
         }
     }
+    #[inline]
+    fn post_exec(
+        &mut self,
+        _state: &mut S,
+        _new_corpus_id: Option<crate::corpus::CorpusId>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl Named for NautilusRandomMutator<'_> {
@@ -91,7 +99,7 @@ pub struct NautilusRecursionMutator<'a> {
 }
 
 impl Debug for NautilusRecursionMutator<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "NautilusRecursionMutator {{}}")
     }
 }
@@ -127,6 +135,14 @@ impl<S: HasRand> Mutator<NautilusInput, S> for NautilusRecursionMutator<'_> {
         }
         Ok(MutationResult::Skipped)
     }
+    #[inline]
+    fn post_exec(
+        &mut self,
+        _state: &mut S,
+        _new_corpus_id: Option<crate::corpus::CorpusId>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl Named for NautilusRecursionMutator<'_> {
@@ -155,14 +171,14 @@ pub struct NautilusSpliceMutator<'a> {
 }
 
 impl Debug for NautilusSpliceMutator<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "NautilusSpliceMutator {{}}")
     }
 }
 
 impl<S> Mutator<NautilusInput, S> for NautilusSpliceMutator<'_>
 where
-    S: HasCorpus<NautilusInput> + HasMetadata + HasRand,
+    S: HasMetadata + HasRand,
 {
     fn mutate(
         &mut self,
@@ -197,6 +213,14 @@ where
             input.tree = Tree::from_rule_vec(tmp, self.ctx);
             Ok(MutationResult::Mutated)
         }
+    }
+    #[inline]
+    fn post_exec(
+        &mut self,
+        _state: &mut S,
+        _new_corpus_id: Option<crate::corpus::CorpusId>,
+    ) -> Result<(), Error> {
+        Ok(())
     }
 }
 

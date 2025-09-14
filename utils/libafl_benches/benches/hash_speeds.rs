@@ -1,11 +1,12 @@
 //! Compare the speed of rust hash implementations
 
-use std::{
+use core::{
     hash::{BuildHasher, Hasher},
+    hint::black_box,
     num::NonZero,
 };
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use libafl_bolts::rands::{Rand, StdRand};
 //use xxhash_rust::const_xxh3;
 use xxhash_rust::xxh3;

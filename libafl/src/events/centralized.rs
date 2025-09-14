@@ -7,7 +7,7 @@
 // 3. The "main evaluator", the evaluator node that will evaluate all the testcases pass by the centralized event manager to see if the testcases are worth propagating
 // 4. The "main broker", the gathers the stats from the fuzzer clients and broadcast the newly found testcases from the main evaluator.
 
-use alloc::{string::String, vec::Vec};
+use alloc::string::String;
 use core::{fmt::Debug, marker::PhantomData, time::Duration};
 use std::process;
 
@@ -15,28 +15,25 @@ use libafl_bolts::{
     ClientId,
     llmp::{LlmpClient, LlmpClientDescription, Tag},
     shmem::{ShMem, ShMemProvider},
-    tuples::{Handle, MatchNameRef},
 };
 #[cfg(feature = "llmp_compression")]
 use libafl_bolts::{
     compress::GzipCompressor,
     llmp::{LLMP_FLAG_COMPRESSED, LLMP_FLAG_INITIALIZED},
 };
-use serde::Serialize;
 
-use super::{AwaitRestartSafe, RecordSerializationTime};
+use super::{AwaitRestartSafe, EventWithStats};
 #[cfg(feature = "llmp_compression")]
 use crate::events::llmp::COMPRESS_THRESHOLD;
 use crate::{
     Error,
     common::HasMetadata,
     events::{
-        AdaptiveSerializer, CanSerializeObserver, Event, EventConfig, EventFirer, EventManagerId,
-        EventReceiver, EventRestarter, HasEventManagerId, LogSeverity, ProgressReporter,
-        SendExiting, serialize_observers_adaptive, std_maybe_report_progress, std_report_progress,
+        Event, EventConfig, EventFirer, EventManagerId, EventReceiver, EventRestarter,
+        HasEventManagerId, LogSeverity, ProgressReporter, SendExiting, std_maybe_report_progress,
+        std_report_progress,
     },
     inputs::Input,
-    observers::TimeObserver,
     state::{HasExecutions, HasLastReportTime, MaybeHasClientPerfMonitor, Stoppable},
 };
 
@@ -50,7 +47,6 @@ pub struct CentralizedEventManager<EM, I, S, SHM, SP> {
     client: LlmpClient<SHM, SP>,
     #[cfg(feature = "llmp_compression")]
     compressor: GzipCompressor,
-    time_ref: Option<Handle<TimeObserver>>,
     is_main: bool,
     phantom: PhantomData<(I, S)>,
 }
@@ -93,7 +89,6 @@ impl CentralizedEventManagerBuilder {
         self,
         inner: EM,
         client: LlmpClient<SP::ShMem, SP>,
-        time_obs: Option<Handle<TimeObserver>>,
     ) -> Result<CentralizedEventManager<EM, I, S, SP::ShMem, SP>, Error>
     where
         SP: ShMemProvider,
@@ -103,7 +98,6 @@ impl CentralizedEventManagerBuilder {
             client,
             #[cfg(feature = "llmp_compression")]
             compressor: GzipCompressor::with_threshold(COMPRESS_THRESHOLD),
-            time_ref: time_obs,
             is_main: self.is_main,
             phantom: PhantomData,
         })
@@ -118,14 +112,13 @@ impl CentralizedEventManagerBuilder {
         inner: EM,
         shmem_provider: SP,
         port: u16,
-        time_obs: Option<Handle<TimeObserver>>,
     ) -> Result<CentralizedEventManager<EM, I, S, SHM, SP>, Error>
     where
         SHM: ShMem,
         SP: ShMemProvider<ShMem = SHM>,
     {
         let client = LlmpClient::create_attach_to_tcp(shmem_provider, port)?;
-        Self::build_from_client(self, inner, client, time_obs)
+        Self::build_from_client(self, inner, client)
     }
 
     /// If a client respawns, it may reuse the existing connection, previously
@@ -135,14 +128,13 @@ impl CentralizedEventManagerBuilder {
         inner: EM,
         shmem_provider: SP,
         env_name: &str,
-        time_obs: Option<Handle<TimeObserver>>,
     ) -> Result<CentralizedEventManager<EM, I, S, SHM, SP>, Error>
     where
         SHM: ShMem,
         SP: ShMemProvider<ShMem = SHM>,
     {
         let client = LlmpClient::on_existing_from_env(shmem_provider, env_name)?;
-        Self::build_from_client(self, inner, client, time_obs)
+        Self::build_from_client(self, inner, client)
     }
 
     /// Create an existing client from description
@@ -151,59 +143,13 @@ impl CentralizedEventManagerBuilder {
         inner: EM,
         shmem_provider: SP,
         description: &LlmpClientDescription,
-        time_obs: Option<Handle<TimeObserver>>,
     ) -> Result<CentralizedEventManager<EM, I, S, SHM, SP>, Error>
     where
         SHM: ShMem,
         SP: ShMemProvider<ShMem = SHM>,
     {
         let client = LlmpClient::existing_client_from_description(shmem_provider, description)?;
-        Self::build_from_client(self, inner, client, time_obs)
-    }
-}
-
-impl<EM, I, S, SHM, SP> RecordSerializationTime for CentralizedEventManager<EM, I, S, SHM, SP>
-where
-    EM: RecordSerializationTime,
-{
-    /// Set the deserialization time (mut)
-    fn set_deserialization_time(&mut self, dur: Duration) {
-        self.inner.set_deserialization_time(dur);
-    }
-}
-
-impl<EM, I, S, SHM, SP> AdaptiveSerializer for CentralizedEventManager<EM, I, S, SHM, SP>
-where
-    EM: AdaptiveSerializer,
-{
-    fn serialization_time(&self) -> Duration {
-        self.inner.serialization_time()
-    }
-    fn deserialization_time(&self) -> Duration {
-        self.inner.deserialization_time()
-    }
-    fn serializations_cnt(&self) -> usize {
-        self.inner.serializations_cnt()
-    }
-    fn should_serialize_cnt(&self) -> usize {
-        self.inner.should_serialize_cnt()
-    }
-
-    fn serialization_time_mut(&mut self) -> &mut Duration {
-        self.inner.serialization_time_mut()
-    }
-    fn deserialization_time_mut(&mut self) -> &mut Duration {
-        self.inner.deserialization_time_mut()
-    }
-    fn serializations_cnt_mut(&mut self) -> &mut usize {
-        self.inner.serializations_cnt_mut()
-    }
-    fn should_serialize_cnt_mut(&mut self) -> &mut usize {
-        self.inner.should_serialize_cnt_mut()
-    }
-
-    fn time_ref(&self) -> &Option<Handle<TimeObserver>> {
-        &self.time_ref
+        Self::build_from_client(self, inner, client)
     }
 }
 
@@ -220,18 +166,18 @@ where
     }
 
     #[expect(clippy::match_same_arms)]
-    fn fire(&mut self, state: &mut S, mut event: Event<I>) -> Result<(), Error> {
+    fn fire(&mut self, state: &mut S, mut event: EventWithStats<I>) -> Result<(), Error> {
         if !self.is_main {
             // secondary node
             let mut is_tc = false;
             // Forward to main only if new tc, heartbeat, or optionally, a new objective
-            let should_be_forwarded = match &mut event {
+            let should_be_forwarded = match event.event_mut() {
                 Event::NewTestcase { forward_id, .. } => {
                     *forward_id = Some(ClientId(self.inner.mgr_id().0 as u32));
                     is_tc = true;
                     true
                 }
-                Event::UpdateExecStats { .. } => true, // send UpdateExecStats but this guy won't be handled. the only purpose is to keep this client alive else the broker thinks it is dead and will dc it
+                Event::Heartbeat => true, // the only purpose is to keep this client alive else the broker thinks it is dead and will dc it
                 Event::Objective { .. } => true,
                 Event::Stop => true,
                 _ => false,
@@ -255,7 +201,10 @@ where
         state: &mut S,
         severity_level: LogSeverity,
         message: String,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        S: HasExecutions,
+    {
         self.inner.log(state, severity_level, message)
     }
 
@@ -275,21 +224,6 @@ where
         self.client.await_safe_to_unmap_blocking();
         self.inner.on_restart(state)?;
         Ok(())
-    }
-}
-
-impl<EM, I, OT, S, SHM, SP> CanSerializeObserver<OT> for CentralizedEventManager<EM, I, S, SHM, SP>
-where
-    EM: AdaptiveSerializer,
-    OT: MatchNameRef + Serialize,
-{
-    fn serialize_observers(&mut self, observers: &OT) -> Result<Option<Vec<u8>>, Error> {
-        serialize_observers_adaptive::<EM, OT>(
-            &mut self.inner,
-            observers,
-            4, // twice as much as the normal llmp em's value cuz it does this job twice.
-            80,
-        )
     }
 }
 
@@ -330,7 +264,7 @@ where
     SHM: ShMem,
     SP: ShMemProvider<ShMem = SHM>,
 {
-    fn try_receive(&mut self, state: &mut S) -> Result<Option<(Event<I>, bool)>, Error> {
+    fn try_receive(&mut self, state: &mut S) -> Result<Option<(EventWithStats<I>, bool)>, Error> {
         if self.is_main {
             // main node
             self.receive_from_secondary(state)
@@ -341,7 +275,7 @@ where
         }
     }
 
-    fn on_interesting(&mut self, state: &mut S, event: Event<I>) -> Result<(), Error> {
+    fn on_interesting(&mut self, state: &mut S, event: EventWithStats<I>) -> Result<(), Error> {
         self.inner.fire(state, event)
     }
 }
@@ -412,7 +346,7 @@ where
     SP: ShMemProvider<ShMem = SHM>,
 {
     #[cfg(feature = "llmp_compression")]
-    fn forward_to_main(&mut self, event: &Event<I>) -> Result<(), Error> {
+    fn forward_to_main(&mut self, event: &EventWithStats<I>) -> Result<(), Error> {
         let serialized = postcard::to_allocvec(event)?;
         let flags = LLMP_FLAG_INITIALIZED;
 
@@ -432,13 +366,16 @@ where
     }
 
     #[cfg(not(feature = "llmp_compression"))]
-    fn forward_to_main(&mut self, event: &Event<I>) -> Result<(), Error> {
+    fn forward_to_main(&mut self, event: &EventWithStats<I>) -> Result<(), Error> {
         let serialized = postcard::to_allocvec(event)?;
         self.client.send_buf(_LLMP_TAG_TO_MAIN, &serialized)?;
         Ok(())
     }
 
-    fn receive_from_secondary(&mut self, state: &mut S) -> Result<Option<(Event<I>, bool)>, Error> {
+    fn receive_from_secondary(
+        &mut self,
+        state: &mut S,
+    ) -> Result<Option<(EventWithStats<I>, bool)>, Error> {
         // TODO: Get around local event copy by moving handle_in_client
         let self_id = self.client.sender().id();
         while let Some((client_id, tag, _flags, msg)) = self.client.recv_buf_with_flags()? {
@@ -461,21 +398,23 @@ where
             } else {
                 msg
             };
-            let event: Event<I> = postcard::from_bytes(event_bytes)?;
-            log::debug!("Processor received message {}", event.name_detailed());
+            let event: EventWithStats<I> = postcard::from_bytes(event_bytes)?;
+            log::debug!(
+                "Processor received message {}",
+                event.event().name_detailed()
+            );
 
-            let event_name = event.name_detailed();
+            let event_name = event.event().name_detailed();
 
-            match event {
+            match event.event() {
                 Event::NewTestcase {
                     client_config,
-                    ref observers_buf,
+                    observers_buf,
                     forward_id,
                     ..
                 } => {
                     log::debug!(
-                        "Received {} from {client_id:?} ({client_config:?}, forward {forward_id:?})",
-                        event_name
+                        "Received {event_name} from {client_id:?} ({client_config:?}, forward {forward_id:?})"
                     );
 
                     log::debug!(
@@ -495,7 +434,7 @@ where
                 _ => {
                     return Err(Error::illegal_state(format!(
                         "Received illegal message that message should not have arrived: {:?}.",
-                        event.name()
+                        event.event().name()
                     )));
                 }
             }

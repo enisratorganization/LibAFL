@@ -22,8 +22,8 @@ use libafl::{
     inputs::{BytesInput, HasTargetBytes},
     monitors::SimpleMonitor,
     mutators::{
-        havoc_mutations, token_mutations::I2SRandReplace, tokens_mutations, StdMOptMutator,
-        StdScheduledMutator, Tokens,
+        havoc_mutations, token_mutations::I2SRandReplace, tokens_mutations, HavocScheduledMutator,
+        StdMOptMutator, Tokens,
     },
     observers::{CanTrack, HitcountsMapObserver, TimeObserver, VariableMapObserver},
     schedulers::{
@@ -53,7 +53,7 @@ use libafl_qemu::{
         edges::StdEdgeCoverageModule,
     },
     Emulator, GuestReg, MmapPerms, QemuExecutor, QemuExitError, QemuExitReason, QemuShutdownCause,
-    Regs,
+    Regs, TargetSignalHandling,
 };
 use libafl_targets::{edges_map_mut_ptr, EDGES_MAP_ALLOCATED_SIZE, MAX_EDGES_FOUND};
 #[cfg(unix)]
@@ -194,6 +194,10 @@ fn fuzz(
         .modules(modules)
         .build()?;
 
+    // return to harness instead of crashing the process.
+    // greatly speeds up crash recovery.
+    emulator.set_target_crash_handling(&TargetSignalHandling::RaiseSignal);
+
     let qemu = emulator.qemu();
 
     let mut elf_buffer = Vec::new();
@@ -315,7 +319,9 @@ fn fuzz(
     });
 
     // Setup a randomic Input2State stage
-    let i2s = StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
+    let i2s = StdMutationalStage::new(HavocScheduledMutator::new(tuple_list!(
+        I2SRandReplace::new()
+    )));
 
     // Setup a MOPT mutator
     let mutator = StdMOptMutator::new(
@@ -359,13 +365,15 @@ fn fuzz(
                 qemu.write_reg(Regs::Rip, test_one_input_ptr).unwrap();
                 qemu.write_reg(Regs::Rsp, stack_ptr).unwrap();
 
-                match qemu.run() {
+                let qemu_ret = qemu.run();
+
+                match qemu_ret {
                     Ok(QemuExitReason::Breakpoint(_)) => {}
-                    Ok(QemuExitReason::End(QemuShutdownCause::HostSignal(signal))) => {
-                        signal.handle();
-                    }
+                    Ok(QemuExitReason::Crash) => return ExitKind::Crash,
+                    Ok(QemuExitReason::Timeout) => return ExitKind::Timeout,
+
                     Err(QemuExitError::UnexpectedExit) => return ExitKind::Crash,
-                    _ => panic!("Unexpected QEMU exit."),
+                    _ => panic!("Unexpected QEMU exit: {qemu_ret:?}"),
                 }
             }
 
@@ -403,7 +411,7 @@ fn fuzz(
         println!("We imported {} input(s) from disk.", state.corpus().count());
     }
 
-    let tracing = ShadowTracingStage::new(&mut executor);
+    let tracing = ShadowTracingStage::new();
 
     // The order of the stages matter!
     let mut stages = tuple_list!(calibration, tracing, i2s, power);

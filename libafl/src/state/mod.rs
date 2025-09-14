@@ -28,23 +28,24 @@ mod stack;
 pub use stack::StageStack;
 
 #[cfg(feature = "std")]
+use crate::fuzzer::ExecuteInputResult;
+#[cfg(feature = "std")]
 use crate::executors::HasObservers;
 #[cfg(feature = "introspection")]
 use crate::monitors::stats::ClientPerfStats;
 use crate::{
     Error, HasMetadata, HasNamedMetadata,
     corpus::{Corpus, CorpusId, HasCurrentCorpusId, HasTestcase, InMemoryCorpus, Testcase},
-    events::{Event, EventFirer, LogSeverity},
+    events::{Event, EventFirer, EventWithStats, LogSeverity},
     executors::{Executor, ExitKind},
     feedbacks::HasObserverHandle,
     feedbacks::StateInitializer,
-    fuzzer::{Evaluator, ExecuteInputResult},
+    fuzzer::Evaluator,
     generators::Generator,
     inputs::{Input, NopInput},
     observers::{MapObserver, ObserversTuple},
     stages::StageId,
 };
-
 /// The maximum size of a testcase
 pub const DEFAULT_MAX_SIZE: usize = 1_048_576;
 
@@ -93,7 +94,7 @@ trait State:
 impl<C, I, R, SC> State for StdState<C, I, R, SC>
 where
     C: Serialize + DeserializeOwned,
-    R: Rand,
+    R: Rand + Serialize + for<'de> Deserialize<'de>,
     SC: Serialize + DeserializeOwned,
 {
 }
@@ -220,8 +221,8 @@ impl<I, S, Z> Debug for LoadConfig<'_, I, S, Z> {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(bound = "
         C: serde::Serialize + for<'a> serde::Deserialize<'a>,
+        R: serde::Serialize + for<'a> serde::Deserialize<'a>,
         SC: serde::Serialize + for<'a> serde::Deserialize<'a>,
-        R: serde::Serialize + for<'a> serde::Deserialize<'a>
     ")]
 pub struct StdState<C, I, R, SC> {
     /// RNG instance
@@ -744,7 +745,7 @@ where
 
     fn load_file<E, EM, Z>(
         &mut self,
-        path: &PathBuf,
+        path: &Path,
         manager: &mut EM,
         fuzzer: &mut Z,
         executor: &mut E,
@@ -754,22 +755,28 @@ where
         EM: EventFirer<I, Self>,
         Z: Evaluator<E, EM, I, Self>,
     {
-        log::info!("Loading file {path:?} ...");
+        log::info!("Loading file {} ...", path.display());
         let input = match (config.loader)(fuzzer, self, path) {
             Ok(input) => input,
             Err(err) => {
-                log::error!("Skipping input that we could not load from {path:?}: {err:?}");
-                return Ok(ExecuteInputResult::None);
+                log::error!(
+                    "Skipping input that we could not load from {}: {err:?}",
+                    path.display()
+                );
+                return Ok(ExecuteInputResult::default());
             }
         };
         if config.forced {
-            let _: CorpusId = fuzzer.add_input(self, executor, manager, input)?;
-            Ok(ExecuteInputResult::Corpus)
+            let (_id, result) = fuzzer.add_input(self, executor, manager, input)?;
+            Ok(result)
         } else {
             let (res, _) = fuzzer.evaluate_input(self, executor, manager, &input)?;
-            if res == ExecuteInputResult::None {
+            if !(res.is_corpus() || res.is_solution()) {
                 fuzzer.add_disabled_input(self, input)?;
-                log::warn!("input {:?} was not interesting, adding as disabled.", &path);
+                log::warn!(
+                    "Input {} was not interesting, adding as disabled.",
+                    path.display()
+                );
             }
             Ok(res)
         }
@@ -792,7 +799,7 @@ where
             match self.next_file() {
                 Ok(path) => {
                     let res = self.load_file(&path, manager, fuzzer, executor, &mut config)?;
-                    if config.exit_on_solution && matches!(res, ExecuteInputResult::Solution) {
+                    if config.exit_on_solution && res.is_solution() {
                         return Err(Error::invalid_corpus(format!(
                             "Input {} resulted in a solution.",
                             path.display()
@@ -806,11 +813,14 @@ where
 
         manager.fire(
             self,
-            Event::Log {
-                severity_level: LogSeverity::Debug,
-                message: format!("Loaded {} initial testcases.", self.corpus().count()), // get corpus count
-                phantom: PhantomData::<I>,
-            },
+            EventWithStats::with_current_time(
+                Event::Log {
+                    severity_level: LogSeverity::Debug,
+                    message: format!("Loaded {} initial testcases.", self.corpus().count()), // get corpus count
+                    phantom: PhantomData::<I>,
+                },
+                *self.executions(),
+            ),
         )?;
         Ok(())
     }
@@ -1019,10 +1029,7 @@ where
             self.reset_initial_files_state();
             self.canonicalize_input_dirs(in_dirs)?;
             if cores.ids.len() > corpus_size {
-                log::info!(
-                    "low intial corpus count ({}), no parallelism required.",
-                    corpus_size
-                );
+                log::info!("low intial corpus count ({corpus_size}), no parallelism required.");
             } else {
                 let core_index = cores
                     .ids
@@ -1166,6 +1173,7 @@ where
 
         mgr.fire(
             self,
+            EventWithStats::with_current_time(
             Event::Log {
                 severity_level: LogSeverity::Debug,
                 message: format!(
@@ -1178,6 +1186,7 @@ where
                 ),
                 phantom: PhantomData::<I>,
             },
+            *self.executions()),
         )?;
 
         Ok(())
@@ -1209,22 +1218,25 @@ where
         for _ in 0..num {
             let input = generator.generate(self)?;
             if forced {
-                let _: CorpusId = fuzzer.add_input(self, executor, manager, input)?;
+                let (_, _) = fuzzer.add_input(self, executor, manager, input)?;
                 added += 1;
             } else {
                 let (res, _) = fuzzer.evaluate_input(self, executor, manager, &input)?;
-                if res != ExecuteInputResult::None {
+                if res.is_corpus() {
                     added += 1;
                 }
             }
         }
         manager.fire(
             self,
-            Event::Log {
-                severity_level: LogSeverity::Debug,
-                message: format!("Loaded {added} over {num} initial testcases"),
-                phantom: PhantomData,
-            },
+            EventWithStats::with_current_time(
+                Event::Log {
+                    severity_level: LogSeverity::Debug,
+                    message: format!("Loaded {added} over {num} initial testcases"),
+                    phantom: PhantomData,
+                },
+                *self.executions(),
+            ),
         )?;
         Ok(())
     }
@@ -1262,7 +1274,15 @@ where
     {
         self.generate_initial_internal(fuzzer, executor, generator, manager, num, false)
     }
+}
 
+impl<C, I, R, SC> StdState<C, I, R, SC>
+where
+    C: Corpus<I>,
+    I: Input,
+    R: Rand,
+    SC: Corpus<I>,
+{
     /// Creates a new `State`, taking ownership of all of the individual components during fuzzing.
     pub fn new<F, O>(
         rand: R,

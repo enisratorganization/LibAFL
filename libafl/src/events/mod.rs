@@ -33,13 +33,11 @@ use ahash::RandomState;
 pub use broker_hooks::*;
 #[cfg(feature = "std")]
 pub use launcher::*;
+use libafl_bolts::current_time;
 #[cfg(all(unix, feature = "std"))]
 use libafl_bolts::os::CTRL_C_EXIT;
 #[cfg(all(unix, feature = "std"))]
 use libafl_bolts::os::unix_signals::{Signal, SignalHandler, siginfo_t, ucontext_t};
-#[cfg(feature = "std")]
-use libafl_bolts::tuples::MatchNameRef;
-use libafl_bolts::{current_time, tuples::Handle};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "std")]
 use uuid::Uuid;
@@ -108,7 +106,7 @@ pub struct EventManagerId(
 use crate::events::multi_machine::NodeId;
 #[cfg(feature = "introspection")]
 use crate::monitors::stats::ClientPerfStats;
-use crate::{observers::TimeObserver, state::HasCurrentStageId};
+use crate::state::HasCurrentStageId;
 
 /// The log event severity
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -240,6 +238,64 @@ where
 }
 */
 
+/// Basic statistics
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ExecStats {
+    /// The time of generation of the [`Event`]
+    time: Duration,
+    /// The executions of this client
+    executions: u64,
+}
+
+impl ExecStats {
+    /// Create an new [`ExecStats`].
+    #[must_use]
+    pub fn new(time: Duration, executions: u64) -> Self {
+        Self { time, executions }
+    }
+}
+
+/// Event with associated stats
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EventWithStats<I> {
+    /// The event
+    event: Event<I>,
+    /// Statistics on new event
+    stats: ExecStats,
+}
+
+impl<I> EventWithStats<I> {
+    /// Create a new [`EventWithStats`].
+    pub fn new(event: Event<I>, stats: ExecStats) -> Self {
+        Self { event, stats }
+    }
+
+    /// Create a new [`EventWithStats`], with the current time.
+    pub fn with_current_time(event: Event<I>, executions: u64) -> Self {
+        let time = current_time();
+
+        Self {
+            event,
+            stats: ExecStats { time, executions },
+        }
+    }
+
+    /// Get the inner ref to the [`Event`] in [`EventWithStats`].
+    pub fn event(&self) -> &Event<I> {
+        &self.event
+    }
+
+    /// Get the inner mutable ref to the [`Event`] in [`EventWithStats`].
+    pub fn event_mut(&mut self) -> &mut Event<I> {
+        &mut self.event
+    }
+
+    /// Get the inner ref to the [`ExecStats`] in [`EventWithStats`].
+    pub fn stats(&self) -> &ExecStats {
+        &self.stats
+    }
+}
+
 // TODO remove forward_id as not anymore needed for centralized
 /// Events sent around in the library
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -258,23 +314,14 @@ pub enum Event<I> {
         corpus_size: usize,
         /// The client config for this observers/testcase combination
         client_config: EventConfig,
-        /// The time of generation of the event
-        time: Duration,
         /// The original sender if, if forwarded
         forward_id: Option<libafl_bolts::ClientId>,
         /// The (multi-machine) node from which the tc is from, if any
         #[cfg(all(unix, feature = "std", feature = "multi_machine"))]
         node_id: Option<NodeId>,
     },
-    /// New stats event to monitor.
-    UpdateExecStats {
-        /// The time of generation of the [`Event`]
-        time: Duration,
-        /// The executions of this client
-        executions: u64,
-        /// [`PhantomData`]
-        phantom: PhantomData<I>,
-    },
+    /// A hearbeat, to notice a fuzzer is still alive.
+    Heartbeat,
     /// New user stats event to monitor.
     UpdateUserStats {
         /// Custom user monitor name
@@ -287,10 +334,6 @@ pub enum Event<I> {
     /// New monitor with performance monitor.
     #[cfg(feature = "introspection")]
     UpdatePerfMonitor {
-        /// The time of generation of the event
-        time: Duration,
-        /// The executions of this client
-        executions: u64,
         /// Current performance statistics
         introspection_stats: Box<ClientPerfStats>,
 
@@ -300,12 +343,9 @@ pub enum Event<I> {
     /// A new objective was found
     Objective {
         /// Input of newly found Objective
-        #[cfg(feature = "share_objectives")]
-        input: I,
+        input: Option<I>,
         /// Objective corpus size
         objective_size: usize,
-        /// The time when this event was created
-        time: Duration,
     },
     /// Write a new log
     Log {
@@ -330,7 +370,7 @@ impl<I> Event<I> {
     pub fn name(&self) -> &str {
         match self {
             Event::NewTestcase { .. } => "Testcase",
-            Event::UpdateExecStats { .. } => "Client Heartbeat",
+            Event::Heartbeat => "Client Heartbeat",
             Event::UpdateUserStats { .. } => "UserStats",
             #[cfg(feature = "introspection")]
             Event::UpdatePerfMonitor { .. } => "PerfMonitor",
@@ -352,7 +392,7 @@ impl<I> Event<I> {
             Event::NewTestcase { input, .. } => {
                 Cow::Owned(format!("Testcase {}", input.generate_name(None)))
             }
-            Event::UpdateExecStats { .. } => Cow::Borrowed("Client Heartbeat"),
+            Event::Heartbeat => Cow::Borrowed("Client Heartbeat"),
             Event::UpdateUserStats { .. } => Cow::Borrowed("UserStats"),
             #[cfg(feature = "introspection")]
             Event::UpdatePerfMonitor { .. } => Cow::Borrowed("PerfMonitor"),
@@ -381,7 +421,7 @@ pub trait EventFirer<I, S> {
     /// (for example for each [`Input`], on multiple cores)
     /// the [`llmp`] shared map may fill up and the client will eventually OOM or [`panic`].
     /// This should not happen for a normal use-case.
-    fn fire(&mut self, state: &mut S, event: Event<I>) -> Result<(), Error>;
+    fn fire(&mut self, state: &mut S, event: EventWithStats<I>) -> Result<(), Error>;
 
     /// Send off an [`Event::Log`] event to the broker.
     /// This is a shortcut for [`EventFirer::fire`] with [`Event::Log`] as argument.
@@ -390,13 +430,27 @@ pub trait EventFirer<I, S> {
         state: &mut S,
         severity_level: LogSeverity,
         message: String,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        S: HasExecutions,
+    {
+        let executions = *state.executions();
+        let cur = current_time();
+
+        let stats = ExecStats {
+            executions,
+            time: cur,
+        };
+
         self.fire(
             state,
-            Event::Log {
-                severity_level,
-                message,
-                phantom: PhantomData,
+            EventWithStats {
+                event: Event::Log {
+                    severity_level,
+                    message,
+                    phantom: PhantomData,
+                },
+                stats,
             },
         )
     }
@@ -408,58 +462,6 @@ pub trait EventFirer<I, S> {
 
     /// Return if we really send this event or not
     fn should_send(&self) -> bool;
-}
-
-/// Serialize all observers for this type and manager
-/// Serialize the observer using the `time_factor` and `percentage_threshold`.
-/// These parameters are unique to each of the different types of `EventManager`
-#[cfg(feature = "std")]
-pub(crate) fn serialize_observers_adaptive<EM, OT>(
-    manager: &mut EM,
-    observers: &OT,
-    time_factor: u32,
-    percentage_threshold: usize,
-) -> Result<Option<Vec<u8>>, Error>
-where
-    EM: AdaptiveSerializer,
-    OT: MatchNameRef + Serialize,
-{
-    match manager.time_ref() {
-        Some(t) => {
-            let exec_time = observers
-                .get(t)
-                .map(|o| o.last_runtime().unwrap_or(Duration::ZERO))
-                .unwrap();
-
-            let mut must_ser = (manager.serialization_time() + manager.deserialization_time())
-                * time_factor
-                < exec_time;
-            if must_ser {
-                *manager.should_serialize_cnt_mut() += 1;
-            }
-
-            if manager.serializations_cnt() > 32 {
-                must_ser = (manager.should_serialize_cnt() * 100 / manager.serializations_cnt())
-                    > percentage_threshold;
-            }
-
-            if manager.serialization_time() == Duration::ZERO
-                || must_ser
-                || manager.serializations_cnt().trailing_zeros() >= 8
-            {
-                let start = current_time();
-                let ser = postcard::to_allocvec(observers)?;
-                *manager.serialization_time_mut() = current_time() - start;
-
-                *manager.serializations_cnt_mut() += 1;
-                Ok(Some(ser))
-            } else {
-                *manager.serializations_cnt_mut() += 1;
-                Ok(None)
-            }
-        }
-        None => Ok(None),
-    }
 }
 
 /// Default implementation of [`ProgressReporter::maybe_report_progress`] for implementors with the
@@ -497,14 +499,18 @@ where
     let executions = *state.executions();
     let cur = current_time();
 
+    let stats = ExecStats {
+        executions,
+        time: cur,
+    };
+
     // Default no introspection implmentation
     #[cfg(not(feature = "introspection"))]
     reporter.fire(
         state,
-        Event::UpdateExecStats {
-            executions,
-            time: cur,
-            phantom: PhantomData,
+        EventWithStats {
+            event: Event::Heartbeat,
+            stats,
         },
     )?;
 
@@ -519,12 +525,13 @@ where
         // costly as `ClientPerfStats` impls `Copy` since it only contains `u64`s
         reporter.fire(
             state,
-            Event::UpdatePerfMonitor {
-                executions,
-                time: cur,
-                introspection_stats: Box::new(state.introspection_stats().clone()),
-                phantom: PhantomData,
-            },
+            EventWithStats::new(
+                Event::UpdatePerfMonitor {
+                    introspection_stats: Box::new(state.introspection_stats().clone()),
+                    phantom: PhantomData,
+                },
+                stats,
+            ),
         )?;
     }
 
@@ -572,12 +579,6 @@ where
     Ok(())
 }
 
-/// The class that implements this must be able to serialize an observer.
-pub trait CanSerializeObserver<OT> {
-    /// Do serialize the observer
-    fn serialize_observers(&mut self, observers: &OT) -> Result<Option<Vec<u8>>, Error>;
-}
-
 /// Send that we're about to exit
 pub trait SendExiting {
     /// Send information that this client is exiting.
@@ -599,11 +600,11 @@ pub trait AwaitRestartSafe {
 pub trait EventReceiver<I, S> {
     /// Lookup for incoming events and process them.
     /// Return the event, if any, that needs to be evaluated
-    fn try_receive(&mut self, state: &mut S) -> Result<Option<(Event<I>, bool)>, Error>;
+    fn try_receive(&mut self, state: &mut S) -> Result<Option<(EventWithStats<I>, bool)>, Error>;
 
     /// Run the post processing routine after the fuzzer deemed this event as interesting
     /// For example, in centralized manager you wanna send this an event.
-    fn on_interesting(&mut self, state: &mut S, event: Event<I>) -> Result<(), Error>;
+    fn on_interesting(&mut self, state: &mut S, event: EventWithStats<I>) -> Result<(), Error>;
 }
 /// The id of this `EventManager`.
 /// For multi processed `EventManagers`,
@@ -626,14 +627,12 @@ impl NopEventManager {
     }
 }
 
-impl RecordSerializationTime for NopEventManager {}
-
 impl<I, S> EventFirer<I, S> for NopEventManager {
     fn should_send(&self) -> bool {
         true
     }
 
-    fn fire(&mut self, _state: &mut S, _event: Event<I>) -> Result<(), Error> {
+    fn fire(&mut self, _state: &mut S, _event: EventWithStats<I>) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -665,21 +664,16 @@ impl AwaitRestartSafe for NopEventManager {
 }
 
 impl<I, S> EventReceiver<I, S> for NopEventManager {
-    fn try_receive(&mut self, _state: &mut S) -> Result<Option<(Event<I>, bool)>, Error> {
+    fn try_receive(&mut self, _state: &mut S) -> Result<Option<(EventWithStats<I>, bool)>, Error> {
         Ok(None)
     }
 
-    fn on_interesting(&mut self, _state: &mut S, _event_vec: Event<I>) -> Result<(), Error> {
+    fn on_interesting(
+        &mut self,
+        _state: &mut S,
+        _event_vec: EventWithStats<I>,
+    ) -> Result<(), Error> {
         Ok(())
-    }
-}
-
-impl<OT> CanSerializeObserver<OT> for NopEventManager
-where
-    OT: Serialize,
-{
-    fn serialize_observers(&mut self, observers: &OT) -> Result<Option<Vec<u8>>, Error> {
-        Ok(Some(postcard::to_allocvec(observers)?))
     }
 }
 
@@ -703,175 +697,10 @@ impl HasEventManagerId for NopEventManager {
     }
 }
 
-/// An `EventManager` type that wraps another manager, but captures a `monitor` type as well.
-/// This is useful to keep the same API between managers with and without an internal `monitor`.
-#[derive(Copy, Clone, Debug)]
-pub struct MonitorTypedEventManager<EM, M> {
-    inner: EM,
-    phantom: PhantomData<M>,
-}
-
-impl<EM, M> RecordSerializationTime for MonitorTypedEventManager<EM, M> {}
-
-impl<EM, M> MonitorTypedEventManager<EM, M> {
-    /// Creates a new `EventManager` that wraps another manager, but captures a `monitor` type as well.
-    #[must_use]
-    pub fn new(inner: EM) -> Self {
-        MonitorTypedEventManager {
-            inner,
-            phantom: PhantomData,
-        }
-    }
-}
-
-impl<EM, M, OT> CanSerializeObserver<OT> for MonitorTypedEventManager<EM, M>
-where
-    OT: Serialize,
-{
-    fn serialize_observers(&mut self, observers: &OT) -> Result<Option<Vec<u8>>, Error> {
-        Ok(Some(postcard::to_allocvec(observers)?))
-    }
-}
-
-impl<EM, I, M, S> EventFirer<I, S> for MonitorTypedEventManager<EM, M>
-where
-    EM: EventFirer<I, S>,
-{
-    fn should_send(&self) -> bool {
-        true
-    }
-
-    #[inline]
-    fn fire(&mut self, state: &mut S, event: Event<I>) -> Result<(), Error> {
-        self.inner.fire(state, event)
-    }
-
-    #[inline]
-    fn log(
-        &mut self,
-        state: &mut S,
-        severity_level: LogSeverity,
-        message: String,
-    ) -> Result<(), Error> {
-        self.inner.log(state, severity_level, message)
-    }
-
-    #[inline]
-    fn configuration(&self) -> EventConfig {
-        self.inner.configuration()
-    }
-}
-
-impl<EM, M, S> EventRestarter<S> for MonitorTypedEventManager<EM, M>
-where
-    EM: EventRestarter<S>,
-{
-    #[inline]
-    fn on_restart(&mut self, state: &mut S) -> Result<(), Error> {
-        self.inner.on_restart(state)
-    }
-}
-
-impl<EM, M> SendExiting for MonitorTypedEventManager<EM, M>
-where
-    EM: SendExiting,
-{
-    #[inline]
-    fn send_exiting(&mut self) -> Result<(), Error> {
-        self.inner.send_exiting()
-    }
-
-    fn on_shutdown(&mut self) -> Result<(), Error> {
-        self.inner.on_shutdown()
-    }
-}
-
-impl<EM, M> AwaitRestartSafe for MonitorTypedEventManager<EM, M>
-where
-    EM: AwaitRestartSafe,
-{
-    #[inline]
-    fn await_restart_safe(&mut self) {
-        self.inner.await_restart_safe();
-    }
-}
-
-impl<EM, I, M, S> EventReceiver<I, S> for MonitorTypedEventManager<EM, M>
-where
-    EM: EventReceiver<I, S>,
-{
-    #[inline]
-    fn try_receive(&mut self, state: &mut S) -> Result<Option<(Event<I>, bool)>, Error> {
-        self.inner.try_receive(state)
-    }
-    fn on_interesting(&mut self, _state: &mut S, _event_vec: Event<I>) -> Result<(), Error> {
-        Ok(())
-    }
-}
-
-impl<EM, M, S> ProgressReporter<S> for MonitorTypedEventManager<EM, M>
-where
-    EM: ProgressReporter<S>,
-{
-    #[inline]
-    fn maybe_report_progress(
-        &mut self,
-        state: &mut S,
-        monitor_timeout: Duration,
-    ) -> Result<(), Error> {
-        self.inner.maybe_report_progress(state, monitor_timeout)
-    }
-
-    #[inline]
-    fn report_progress(&mut self, state: &mut S) -> Result<(), Error> {
-        self.inner.report_progress(state)
-    }
-}
-
-impl<EM, M> HasEventManagerId for MonitorTypedEventManager<EM, M>
-where
-    EM: HasEventManagerId,
-{
-    #[inline]
-    fn mgr_id(&self) -> EventManagerId {
-        self.inner.mgr_id()
-    }
-}
-
-/// Record the deserialization time for this event manager
-pub trait RecordSerializationTime {
-    /// Set the deserialization time (mut)
-    fn set_deserialization_time(&mut self, _dur: Duration) {}
-}
-
-/// Collected stats to decide if observers must be serialized or not
-pub trait AdaptiveSerializer {
-    /// Expose the collected observers serialization time
-    fn serialization_time(&self) -> Duration;
-    /// Expose the collected observers deserialization time
-    fn deserialization_time(&self) -> Duration;
-    /// How many times observers were serialized
-    fn serializations_cnt(&self) -> usize;
-    /// How many times shoukd have been serialized an observer
-    fn should_serialize_cnt(&self) -> usize;
-
-    /// Expose the collected observers serialization time (mut)
-    fn serialization_time_mut(&mut self) -> &mut Duration;
-    /// Expose the collected observers deserialization time (mut)
-    fn deserialization_time_mut(&mut self) -> &mut Duration;
-    /// How many times observers were serialized (mut)
-    fn serializations_cnt_mut(&mut self) -> &mut usize;
-    /// How many times shoukd have been serialized an observer (mut)
-    fn should_serialize_cnt_mut(&mut self) -> &mut usize;
-
-    /// A [`Handle`] to the time observer to determine the `time_factor`
-    fn time_ref(&self) -> &Option<Handle<TimeObserver>>;
-}
-
 #[cfg(test)]
 mod tests {
 
-    use libafl_bolts::{Named, current_time, tuples::tuple_list};
+    use libafl_bolts::{Named, tuples::tuple_list};
     use tuple_list::tuple_list_type;
 
     use crate::{
@@ -900,7 +729,6 @@ mod tests {
             exit_kind: ExitKind::Ok,
             corpus_size: 123,
             client_config: EventConfig::AlwaysUnique,
-            time: current_time(),
             forward_id: None,
             #[cfg(all(unix, feature = "std", feature = "multi_machine"))]
             node_id: None,

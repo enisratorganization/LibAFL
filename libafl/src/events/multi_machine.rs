@@ -1,16 +1,10 @@
-use core::fmt::Display;
-use std::{
-    boxed::Box,
-    collections::HashMap,
-    io::ErrorKind,
-    process,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::{
+    fmt::Display,
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
-    vec::Vec,
 };
+use std::{collections::HashMap, io::ErrorKind, process, sync::OnceLock};
 
 use enumflags2::{BitFlags, bitflags};
 #[cfg(feature = "llmp_compression")]
@@ -28,7 +22,7 @@ use tokio::{
 use typed_builder::TypedBuilder;
 
 use crate::{
-    events::{Event, TcpMultiMachineLlmpReceiverHook, TcpMultiMachineLlmpSenderHook},
+    events::{EventWithStats, TcpMultiMachineLlmpReceiverHook, TcpMultiMachineLlmpSenderHook},
     inputs::{Input, NopInput},
 };
 
@@ -56,7 +50,7 @@ pub enum MultiMachineMsg<'a, I> {
     LlmpMsg(OwnedRef<'a, [u8]>),
 
     /// A `LibAFL` Event (already deserialized)
-    Event(OwnedRef<'a, Event<I>>),
+    Event(OwnedRef<'a, EventWithStats<I>>),
 }
 
 /// We do not use raw pointers, so no problem with thead-safety
@@ -71,7 +65,7 @@ impl<'a, I> MultiMachineMsg<'a, I> {
     /// `OwnedRef` should **never** be a raw pointer for thread-safety reasons.
     /// We check this for debug builds, but not for release.
     #[must_use]
-    pub unsafe fn event(event: OwnedRef<'a, Event<I>>) -> Self {
+    pub unsafe fn event(event: OwnedRef<'a, EventWithStats<I>>) -> Self {
         debug_assert!(!event.is_raw());
 
         MultiMachineMsg::Event(event)
@@ -274,10 +268,10 @@ where
                 let timeout = current_time() + parent_lock.node_descriptor.timeout;
 
                 parent_lock.parent = loop {
-                    log::debug!("Trying to connect to parent @ {}..", parent_addr);
+                    log::debug!("Trying to connect to parent @ {parent_addr}..");
                     match TcpStream::connect(parent_addr).await {
                         Ok(stream) => {
-                            log::debug!("Connected to parent @ {}", parent_addr);
+                            log::debug!("Connected to parent @ {parent_addr}");
 
                             break Some(stream);
                         }
@@ -308,10 +302,10 @@ where
 
                 // The main listening loop. Should never fail.
                 'listening: loop {
-                    log::debug!("listening for children on {:?}...", listener);
+                    log::debug!("listening for children on {listener:?}...");
                     match listener.accept().await {
                         Ok((mut stream, addr)) => {
-                            log::debug!("{} joined the children.", addr);
+                            log::debug!("{addr} joined the children.");
                             let mut state_guard = state.write().await;
 
                             if let Err(e) = state_guard
@@ -407,9 +401,9 @@ where
 
     /// Write an [`OwnedTcpMultiMachineMsg`] to a stream.
     /// Can be read back using [`TcpMultiMachineState::read_msg`].
-    async fn write_msg<'a, I: Input>(
+    async fn write_msg<I: Input>(
         stream: &mut TcpStream,
-        msg: &MultiMachineMsg<'a, I>,
+        msg: &MultiMachineMsg<'_, I>,
     ) -> Result<(), Error> {
         let serialized_msg = msg.serialize_as_ref();
         let msg_len = u32::to_le_bytes(serialized_msg.len() as u32);
@@ -451,9 +445,9 @@ where
         Ok(())
     }
 
-    pub(crate) async fn send_interesting_event_to_nodes<'a, I: Input>(
+    pub(crate) async fn send_interesting_event_to_nodes<I: Input>(
         &mut self,
-        msg: &MultiMachineMsg<'a, I>,
+        msg: &MultiMachineMsg<'_, I>,
     ) -> Result<(), Error> {
         log::debug!("Sending interesting events to nodes...");
 
@@ -493,7 +487,7 @@ where
 
             // Garbage collect disconnected children
             for id_to_remove in &ids_to_remove {
-                log::debug!("Child {:?} has been garbage collected.", id_to_remove);
+                log::debug!("Child {id_to_remove:?} has been garbage collected.");
                 self.children.remove(id_to_remove);
             }
         }
@@ -503,9 +497,9 @@ where
 
     /// Flush the message queue from other nodes and add incoming events to the
     /// centralized event manager queue.
-    pub(crate) async fn receive_new_messages_from_nodes<'a, I: Input>(
+    pub(crate) async fn receive_new_messages_from_nodes<I: Input>(
         &mut self,
-        msgs: &mut Vec<MultiMachineMsg<'a, I>>,
+        msgs: &mut Vec<MultiMachineMsg<'_, I>>,
     ) -> Result<(), Error> {
         log::debug!("Checking for new events from other nodes...");
         // let mut nb_received = 0usize;
@@ -602,7 +596,7 @@ where
 
         // Garbage collect disconnected children
         for id_to_remove in &ids_to_remove {
-            log::debug!("Child {:?} has been garbage collected.", id_to_remove);
+            log::debug!("Child {id_to_remove:?} has been garbage collected.");
             self.children.remove(id_to_remove);
         }
 

@@ -1,6 +1,7 @@
+use core::marker::PhantomData;
 use std::{
     io::{Read, Seek},
-    marker::PhantomData,
+    ops::IndexMut,
     os::fd::AsRawFd,
 };
 
@@ -11,7 +12,10 @@ use libafl::{
     observers::{ObserversTuple, StdOutObserver},
     state::HasExecutions,
 };
-use libafl_bolts::{AsSlice, tuples::RefIndexable};
+use libafl_bolts::{
+    AsSlice,
+    tuples::{Handle, RefIndexable},
+};
 use libnyx::NyxReturnValue;
 
 use crate::{cmplog::CMPLOG_ENABLED, helper::NyxHelper};
@@ -21,7 +25,7 @@ pub struct NyxExecutor<S, OT> {
     /// implement nyx function
     pub helper: NyxHelper,
     /// stdout
-    stdout: Option<StdOutObserver>,
+    stdout: Option<Handle<StdOutObserver>>,
     /// stderr
     // stderr: Option<StdErrObserver>,
     /// observers
@@ -112,7 +116,7 @@ where
             }
         };
 
-        if let Some(ob) = self.stdout.as_mut() {
+        if let Some(ob) = self.stdout.clone() {
             let mut stdout = Vec::new();
             self.helper.nyx_stdout.rewind()?;
             self.helper
@@ -120,7 +124,7 @@ where
                 .read_to_end(&mut stdout)
                 .map_err(|e| Error::illegal_state(format!("Failed to read Nyx stdout: {e}")))?;
 
-            ob.observe(&stdout);
+            self.observers_mut().index_mut(&ob).observe(stdout);
         }
 
         unsafe {
@@ -135,11 +139,11 @@ where
 }
 
 impl<S, OT> HasTimeout for NyxExecutor<S, OT> {
-    fn timeout(&self) -> std::time::Duration {
+    fn timeout(&self) -> core::time::Duration {
         self.helper.timeout
     }
 
-    fn set_timeout(&mut self, timeout: std::time::Duration) {
+    fn set_timeout(&mut self, timeout: core::time::Duration) {
         let micros = 1000000;
         let mut timeout_secs = timeout.as_secs();
         let mut timeout_micros = timeout.as_micros() - u128::from(timeout.as_secs() * micros);
@@ -163,13 +167,13 @@ impl<S, OT> NyxExecutor<S, OT> {
     /// Mutable borrow may only be used once at a time.
     pub unsafe fn trace_bits(self) -> &'static mut [u8] {
         unsafe {
-            std::slice::from_raw_parts_mut(self.helper.bitmap_buffer, self.helper.bitmap_size)
+            core::slice::from_raw_parts_mut(self.helper.bitmap_buffer, self.helper.bitmap_size)
         }
     }
 }
 
 pub struct NyxExecutorBuilder {
-    stdout: Option<StdOutObserver>,
+    stdout: Option<Handle<StdOutObserver>>,
     // stderr: Option<StdErrObserver>,
 }
 
@@ -188,7 +192,7 @@ impl NyxExecutorBuilder {
         }
     }
 
-    pub fn stdout(&mut self, stdout: StdOutObserver) -> &mut Self {
+    pub fn stdout(&mut self, stdout: Handle<StdOutObserver>) -> &mut Self {
         self.stdout = Some(stdout);
         self
     }

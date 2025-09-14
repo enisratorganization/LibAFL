@@ -1,19 +1,22 @@
-use std::{
+extern crate alloc;
+
+use alloc::{
     borrow::ToOwned,
     boxed::Box,
-    ffi::{CStr, CString},
-    fmt::Debug,
-    format, fs,
-    ops::RangeInclusive,
+    ffi::CString,
+    format,
+    string::{String, ToString},
+    vec::Vec,
+};
+use core::{ffi::CStr, fmt::Debug, ops::RangeInclusive, ptr};
+use std::{
+    fs,
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         raw::c_void,
     },
     path::Path,
-    ptr,
-    string::{String, ToString},
     sync::LazyLock,
-    vec::Vec,
 };
 
 use arbitrary_int::u4;
@@ -468,8 +471,7 @@ impl IntelPT {
                     if e.code() != PtErrorCode::Eos {
                         let offset = decoder.offset().map_err(error_from_pt_error)?;
                         log::info!(
-                            "PT error in block next {e:?} trace offset {offset:x} last decoded block end {:x}",
-                            previous_block_end_ip
+                            "PT error in block next {e:?} trace offset {offset:x} last decoded block end {previous_block_end_ip:x}"
                         );
                     }
                     break 'block;
@@ -722,8 +724,7 @@ impl IntelPTBuilder {
 
     /// Set the size of the perf aux buffer (actual PT traces buffer)
     pub fn perf_aux_buffer_size(mut self, perf_aux_buffer_size: usize) -> Result<Self, Error> {
-        // todo:replace with is_multiple_of once stable
-        if perf_aux_buffer_size % PAGE_SIZE != 0 {
+        if !perf_aux_buffer_size.is_multiple_of(PAGE_SIZE) {
             return Err(Error::illegal_argument(
                 "IntelPT perf_aux_buffer must be page aligned",
             ));
@@ -901,7 +902,7 @@ fn linux_version() -> Result<(usize, usize, usize), ()> {
         domainname: [0; 65],
     };
 
-    if unsafe { libc::uname(&mut uname_data) } != 0 {
+    if unsafe { libc::uname(&raw mut uname_data) } != 0 {
         return Err(());
     }
 
