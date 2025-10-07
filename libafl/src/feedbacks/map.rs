@@ -160,6 +160,10 @@ where
 pub struct MapIndexesMetadata {
     /// The list of indexes.
     pub list: Vec<usize>,
+    /// Multiple MapObservers can be added to above list.
+    /// An addend that is sufficiently large marks the indices of each different MapObserver
+    /// The addends are: 0x10000000,  0x20000000, 0x30000000, ...
+    pub num_maps: usize,
     /// A refcount used to know when we can remove this metadata
     pub tcref: isize,
 }
@@ -195,7 +199,13 @@ impl MapIndexesMetadata {
     /// Creates a new [`struct@MapIndexesMetadata`].
     #[must_use]
     pub fn new(list: Vec<usize>) -> Self {
-        Self { list, tcref: 0 }
+        Self { list, num_maps: 1, tcref: 0 }
+    }
+
+    /// add to existing list with large addend
+    pub fn extend(&mut self,  indices: &Vec<usize>) {
+        self.list.extend( indices.iter().map(|&x| x + self.num_maps<<28) );
+        self.num_maps += 1;
     }
 }
 
@@ -402,12 +412,15 @@ where
                 history_map[i] = val;
                 indices.push(i);
             }
-            let meta = MapIndexesMetadata::new(indices);
-            if testcase.try_add_metadata(meta).is_err() {
-                return Err(Error::key_exists(
-                    "MapIndexesMetadata is already attached to this testcase. You should not have more than one observer with tracking.",
-                ));
-            }
+            match testcase.metadata_mut::<MapIndexesMetadata>() {
+                Ok(meta) => {
+                    meta.extend( &indices );
+                }
+                Err(_) => {
+                    testcase.add_metadata( MapIndexesMetadata::new(indices) );
+                }
+            };
+            
         } else {
             for (i, value) in observer
                 .as_iter()

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     Error,
-    observers::{Observer, VarLenMapObserver, map::MapObserver},
+    observers::{Observer, VarLenMapObserver, map::MapObserver, ExitKind},
 };
 
 /// Overlooking a variable bitmap
@@ -26,6 +26,7 @@ pub struct VariableMapObserver<'a, T> {
     size: OwnedMutPtr<usize>,
     initial: T,
     name: Cow<'static, str>,
+    ign: Vec<usize>,
 }
 
 impl<I, S, T> Observer<I, S> for VariableMapObserver<'_, T>
@@ -35,6 +36,17 @@ where
     #[inline]
     fn pre_exec(&mut self, _state: &mut S, _input: &I) -> Result<(), Error> {
         self.reset_map()
+    }
+
+    #[inline]
+    fn post_exec(
+        &mut self,
+        _state: &mut S,
+        _input: &I,
+        _exit_kind: &ExitKind,
+    ) -> Result<(), Error> {
+        self.process_ignore_list(&self.ign.clone());
+        Ok(())
     }
 }
 
@@ -141,6 +153,18 @@ where
         }
         res
     }
+
+    fn ignore(&mut self, indices: &[usize]) {
+        for i in indices {
+            if !self.ign.contains(i) {
+                self.ign.push(*i);
+            }
+        }
+    }
+
+    fn is_ignored(&self, idx: &usize) -> bool {
+        self.ign.contains(idx)
+    }
 }
 
 impl<T> VarLenMapObserver for VariableMapObserver<'_, T>
@@ -198,6 +222,7 @@ where
             map: map_slice,
             size: OwnedMutPtr::Ptr(size),
             initial: T::default(),
+            ign: Vec::new(),
         }
     }
 
