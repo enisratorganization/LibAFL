@@ -8,7 +8,7 @@ use core::{
 };
 
 use libafl_bolts::{
-    AsSlice, AsSliceMut, HasLen, Named,
+    AsSlice, AsSliceMut, HasLen, Named, IntoOwned,
     ownedref::{OwnedMutPtr, OwnedMutSlice},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -27,6 +27,10 @@ pub struct VariableMapObserver<'a, T> {
     initial: T,
     name: Cow<'static, str>,
     ign: Vec<usize>,
+    /// Quick hack to fix size at 0 during runtime after receiving a map.
+    /// E.g. in heterogenous fuzzers where you want to use the map in one fuzzers
+    /// but not the others. Keeps it local at runtime essentially
+    pub zero_after_deser: bool
 }
 
 impl<I, S, T> Observer<I, S> for VariableMapObserver<'_, T>
@@ -57,16 +61,19 @@ impl<T> Named for VariableMapObserver<'_, T> {
     }
 }
 
-impl<T> HasLen for VariableMapObserver<'_, T> {
+impl<T> HasLen for VariableMapObserver<'_, T> 
+where
+    T: Clone+Default
+{
     #[inline]
     fn len(&self) -> usize {
-        *self.size.as_ref()
+        self.len_internal()
     }
 }
 
 impl<T> Hash for VariableMapObserver<'_, T>
 where
-    T: Hash,
+    T: Hash+Clone+Default,
 {
     #[inline]
     fn hash<H: Hasher>(&self, hasher: &mut H) {
@@ -88,7 +95,7 @@ impl<T> AsMut<Self> for VariableMapObserver<'_, T> {
 
 impl<T> MapObserver for VariableMapObserver<'_, T>
 where
-    T: PartialEq + Copy + Hash + Serialize + DeserializeOwned + Debug,
+    T: PartialEq + Copy + Clone + Default + Hash + Serialize + DeserializeOwned + Debug,
 {
     type Entry = T;
 
@@ -99,7 +106,7 @@ where
 
     #[inline]
     fn usable_count(&self) -> usize {
-        *self.size.as_ref()
+        self.len_internal()
     }
 
     fn get(&self, idx: usize) -> T {
@@ -169,7 +176,7 @@ where
 
 impl<T> VarLenMapObserver for VariableMapObserver<'_, T>
 where
-    T: PartialEq + Copy + Hash + Serialize + DeserializeOwned + Debug,
+    T: PartialEq + Copy + Default + Clone + Hash + Serialize + DeserializeOwned + Debug,
 {
     fn map_slice(&self) -> &[Self::Entry] {
         self.map.as_ref()
@@ -188,24 +195,30 @@ where
     }
 }
 
-impl<T> Deref for VariableMapObserver<'_, T> {
+impl<T> Deref for VariableMapObserver<'_, T>
+where
+    T: Clone+Default
+{
     type Target = [T];
     fn deref(&self) -> &[T] {
-        let cnt = *self.size.as_ref();
+        let cnt = self.len_internal();
         &self.map[..cnt]
     }
 }
 
-impl<T> DerefMut for VariableMapObserver<'_, T> {
+impl<T> DerefMut for VariableMapObserver<'_, T> 
+where
+    T: Clone+Default
+{
     fn deref_mut(&mut self) -> &mut [T] {
-        let cnt = *self.size.as_ref();
+        let cnt = self.len_internal();
         &mut self.map[..cnt]
     }
 }
 
 impl<'a, T> VariableMapObserver<'a, T>
 where
-    T: Default,
+    T: Default+Clone,
 {
     /// Creates a new [`MapObserver`] from an [`OwnedMutSlice`]
     ///
@@ -223,6 +236,23 @@ where
             size: OwnedMutPtr::Ptr(size),
             initial: T::default(),
             ign: Vec::new(),
+            zero_after_deser: false
+        }
+    }
+
+    /// after deser, this map is always 0
+    pub unsafe fn from_mut_slice_only_local(
+        name: &'static str,
+        map_slice: OwnedMutSlice<'a, T>,
+        size: *mut usize,
+    ) -> Self {
+        VariableMapObserver {
+            name: name.into(),
+            map: map_slice,
+            size: OwnedMutPtr::Ptr(size),
+            initial: T::default(),
+            ign: Vec::new(),
+            zero_after_deser: true
         }
     }
 
@@ -243,6 +273,32 @@ where
                 OwnedMutSlice::from_raw_parts_mut(map_ptr, max_len),
                 size,
             )
+        }
+    }
+
+    /// after deser, this map is always 0
+    pub unsafe fn from_mut_ptr_only_local(
+        name: &'static str,
+        map_ptr: *mut T,
+        max_len: usize,
+        size: *mut usize,
+    ) -> Self {
+        unsafe {
+            Self::from_mut_slice_only_local(
+                name,
+                OwnedMutSlice::from_raw_parts_mut(map_ptr, max_len),
+                size,
+            )
+        }
+    }
+
+    /// For len hack after deser
+    pub fn len_internal(&self) -> usize {
+        if self.zero_after_deser && self.map.is_owned() {
+            // DONT use when this was received from remote fuzzing instance
+            0
+        } else {
+            *self.size.as_ref()
         }
     }
 }
