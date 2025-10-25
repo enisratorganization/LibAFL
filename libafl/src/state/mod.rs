@@ -145,14 +145,18 @@ pub trait HasMutatorTargetPosRand {
     fn divide_range_below(&self, length: usize, divide_by_n: usize, jth_chunk: usize) -> (usize, usize)
     {
         let (J, N) = (jth_chunk, divide_by_n);
-        let chunksz = length/N;
-        let start = chunksz*J;
-        let end_excl = match J+1 == N {
-            true => length,
-            false => chunksz*(J+1)
-        };
+        if length <= N {
+            return (0, length)
+        } else {
+            let chunksz = length/N;
+            let start = chunksz*J;
+            let end_excl = match J+1 == N {
+                true => length,
+                false => chunksz*(J+1)
+            };
 
-        (start, end_excl)
+            return (start, end_excl)
+        }
     }
 }
 
@@ -267,11 +271,13 @@ pub struct StdState<C, I, R, SC> {
     solutions: SC,
     #[cfg(feature = "unstable_corpus")]
     unstable_corpus: SC,
-    /// a Range of target (byte) positions in the input for mutators to choose from
+    /// Determine more specifically WHERE to mutate.
+    /// Target (byte) positions in the input for mutators to choose from.
+    /// (J, N, prob) 
     /// The range is not absolute! Rather it is J out of N, where J=0..N-1,
     /// meaning the input.mutator_bytes() is to be divided into N "equal" chunks and
     /// we cover only the Jth chunk
-    pub mutator_target_chunk: (usize, usize),
+    pub mutator_target_chunk: (usize, usize, f64),
     /// Metadata stored for this state by one of the components
     metadata: SerdeAnyMap,
     /// Metadata stored with names
@@ -311,7 +317,11 @@ where
 {
     fn get_target_pos(&mut self, lower_bound_incl: usize, upper_bound_excl: usize) -> usize 
     {
-        let (start, end_excl) = self.divide_range_below(upper_bound_excl-lower_bound_incl, self.mutator_target_chunk.1, self.mutator_target_chunk.0);
+        let prob = self.mutator_target_chunk.2;
+        let (start, end_excl) = match self.rand_mut().coinflip(prob){
+            true => self.divide_range_below(upper_bound_excl-lower_bound_incl, self.mutator_target_chunk.1, self.mutator_target_chunk.0),
+            false => (0, upper_bound_excl-lower_bound_incl)
+        };
         if end_excl - start <= 1 { return lower_bound_incl + start; }
 
         let nonz_len = unsafe { NonZero::new(end_excl-start).unwrap_unchecked() };
@@ -325,7 +335,12 @@ where
     ///
     /// This problem corresponds to: <https://oeis.org/A059036>
     fn rand_range_for_target_pos(&mut self, upper: usize, max_len: NonZeroUsize) -> Range<usize> {
-        let (start, end_excl) = self.divide_range_below(upper, self.mutator_target_chunk.1, self.mutator_target_chunk.0);
+
+        let prob = self.mutator_target_chunk.2;
+        let (start, end_excl) = match self.rand_mut().coinflip(prob){
+            true => self.divide_range_below(upper, self.mutator_target_chunk.1, self.mutator_target_chunk.0),
+            false => (0, upper)
+        };
 
         let len = 1 + self.rand_mut().below(max_len);
         // sample from [1..upper + len]
@@ -1389,7 +1404,7 @@ where
             solutions,
             #[cfg(feature = "unstable_corpus")]
             unstable_corpus,
-            mutator_target_chunk: (0,1),
+            mutator_target_chunk: (0,1, 1.0),
             max_size: DEFAULT_MAX_SIZE,
             stop_requested: false,
             #[cfg(feature = "introspection")]
