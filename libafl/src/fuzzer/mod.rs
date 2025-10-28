@@ -1132,10 +1132,27 @@ impl<CS, F, IC, IF, OF, C, MF> HasBytesConverter for StdFuzzer<CS, F, IC, IF, OF
     }
 }
 
+#[cfg(not(feature = "stability_check_on_reception"))] 
+impl<CS, F, OF> StdFuzzer<CS, F, NopBytesConverter, NopInputFilter, OF, &ConstMapObserver<'_, u8, 0>, ConstMapObserver<'_, u8, 0>> {
+    /// Create a new [`StdFuzzer`] with standard behavior and no duplicate input execution filtering.
+    pub fn new(scheduler: CS, feedback: F, objective: OF, 
+    ) -> Self {
+        Self {
+            scheduler,
+            feedback,
+            objective,
+            bytes_converter: NopBytesConverter::default(),
+            input_filter: NopInputFilter,
+            share_objectives: false,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "stability_check_on_reception")] 
 impl<CS, F, OF, C, MF> StdFuzzer<CS, F, NopBytesConverter, NopInputFilter, OF, C, MF> {
     /// Create a new [`StdFuzzer`] with standard behavior and no duplicate input execution filtering.
     pub fn new(scheduler: CS, feedback: F, objective: OF, 
-        #[cfg(feature = "stability_check_on_reception")] 
         map_handle_for_instability_check: Handle<C>,
     ) -> Self {
         Self {
@@ -1145,7 +1162,6 @@ impl<CS, F, OF, C, MF> StdFuzzer<CS, F, NopBytesConverter, NopInputFilter, OF, C
             bytes_converter: NopBytesConverter::default(),
             input_filter: NopInputFilter,
             share_objectives: false,
-            #[cfg(feature = "stability_check_on_reception")]
             map_handle_for_instability_check,
             _phantom: PhantomData,
         }
