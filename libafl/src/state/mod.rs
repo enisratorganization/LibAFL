@@ -5,8 +5,7 @@ use alloc::vec::Vec;
 use core::{
     borrow::BorrowMut, cell::{Ref, RefMut}, fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration
 };
-use std::io;
-use std::io::Write;
+
 #[cfg(feature = "std")]
 use std::{
     fs,
@@ -313,6 +312,8 @@ pub struct StdState<C, I, R, SC> {
     phantom: PhantomData<I>,
 }
 
+// use std::io;
+// use std::io::Write;
 // fn print_noerr(s: &str) {
 // loop {
 //     match io::stdout().write_all(format!("{}\n", s).as_bytes()) {
