@@ -3,8 +3,10 @@
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
 use core::{
-    borrow::BorrowMut, cell::{Ref, RefMut}, fmt::Debug, marker::PhantomData, num::NonZero, num::NonZeroUsize, time::Duration
+    borrow::BorrowMut, cell::{Ref, RefMut}, fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration
 };
+use std::io;
+use std::io::Write;
 #[cfg(feature = "std")]
 use std::{
     fs,
@@ -148,11 +150,11 @@ pub trait HasMutatorTargetPosRand {
         if length <= N {
             return (0, length)
         } else {
-            let chunksz = length/N;
-            let start = chunksz*J;
+            let chunksz = (length as f32)/N as f32;
+            let start = (chunksz*(J as f32) ).round() as usize;
             let end_excl = match J+1 == N {
                 true => length,
-                false => chunksz*(J+1)
+                false => (chunksz*((J+1) as f32) ).round() as usize
             };
 
             return (start, end_excl)
@@ -311,6 +313,16 @@ pub struct StdState<C, I, R, SC> {
     phantom: PhantomData<I>,
 }
 
+// fn print_noerr(s: &str) {
+// loop {
+//     match io::stdout().write_all(format!("{}\n", s).as_bytes()) {
+//         // Use this loop, because O_NONBLOCKING
+//         Ok(_) => break,
+//         _ => {}
+//     }
+// }
+// }
+
 impl<C, I, R, SC> HasMutatorTargetPosRand for StdState<C, I, R, SC>
 where
     R: Rand
@@ -322,11 +334,9 @@ where
             true => self.divide_range_below(upper_bound_excl-lower_bound_incl, self.mutator_target_chunk.1, self.mutator_target_chunk.0),
             false => (0, upper_bound_excl-lower_bound_incl)
         };
-        if end_excl - start <= 1 { return lower_bound_incl + start; }
-
-        let nonz_len = unsafe { NonZero::new(end_excl-start).unwrap_unchecked() };
-        let randi = self.rand_mut().below( nonz_len );
-        //println!("get_target_pos ({}/{}): -{} {}", self.mutator_target_chunk.0, self.mutator_target_chunk.1, upper_bound_excl, lower_bound_incl + start +  randi);
+        let sz = end_excl-start;
+        let randi = self.rand_mut().below_or_zero( sz );
+        //print_noerr(&format!("get_target_pos ({}/{}): {}-{} {}", self.mutator_target_chunk.0, self.mutator_target_chunk.1, lower_bound_incl, upper_bound_excl, lower_bound_incl + start +  randi));
         lower_bound_incl + start +  randi
     }
     /// Generate a range of values where (upon repeated calls) each index is likely to appear in the
@@ -335,34 +345,27 @@ where
     ///
     /// This problem corresponds to: <https://oeis.org/A059036>
     fn rand_range_for_target_pos(&mut self, upper: usize, max_len: NonZeroUsize) -> Range<usize> {
-
+        let len = 1 + self.rand_mut().below(max_len);
+       
+        let actual_upper = upper + len - 1;
         let prob = self.mutator_target_chunk.2;
         let (start, end_excl) = match self.rand_mut().coinflip(prob){
-            true => self.divide_range_below(upper, self.mutator_target_chunk.1, self.mutator_target_chunk.0),
-            false => (0, upper)
+            true => self.divide_range_below(actual_upper, self.mutator_target_chunk.1, self.mutator_target_chunk.0),
+            false => (0, actual_upper)
         };
 
-        let len = 1 + self.rand_mut().below(max_len);
-        // sample from [1..upper + len]
-        // try to hit target chunk (start, end_excl)
-        if end_excl - start <= 1 {
-            // no choice?
-            //println!("rand_range_for_target_pos ({}/{}): {} -{} [{} {}]", self.mutator_target_chunk.0, self.mutator_target_chunk.1, len, upper, start, usize::min(upper, start+len));
-            return start..usize::min(upper, start+len)
-        } else {
-            loop {
-                // we should hit (start, end_excl) sometime... no point in optimization?
-                let mut offset2 = 1 + self.rand_mut().below_or_zero(upper + len - 1);
-                let offset1 = offset2.saturating_sub(len);
-                if start <= offset1 && offset1 < end_excl {
-                    if offset2 > upper {
-                        offset2 = upper;
-                    }
-                    //println!("rand_range_for_target_pos ({}/{}): {} -{} [{} {}]", self.mutator_target_chunk.0, self.mutator_target_chunk.1, len, upper, offset1, offset2);
-                    return offset1..offset2
-                }
-            }
+        let sz = end_excl-start;
+        let randi = self.rand_mut().below_or_zero( sz );
+
+        let mut offset2 = 1 + start+randi;
+
+        let offset1 = offset2.saturating_sub(len);
+        if offset2 > upper {
+            offset2 = upper;
         }
+    
+        //print_noerr(&format!("rand_range_for_target_pos ({}/{}): {} 0-{} [{} {}]", self.mutator_target_chunk.0, self.mutator_target_chunk.1, max_len, upper, offset1, offset2));
+        offset1..offset2
     }
 }
 
