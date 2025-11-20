@@ -3,15 +3,17 @@
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
 use core::{
-    borrow::BorrowMut, cell::{Ref, RefMut}, fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration
+    borrow::BorrowMut,
+    cell::{Ref, RefMut},
+    fmt::Debug,
+    marker::PhantomData,
+    time::Duration,
 };
-
 #[cfg(feature = "std")]
 use std::{
     fs,
     path::{Path, PathBuf},
     string::{String, ToString},
-    ops::Range
 };
 
 #[cfg(feature = "std")]
@@ -126,41 +128,6 @@ pub trait HasRand {
     fn rand_mut(&mut self) -> &mut Self::Rand;
 }
 
-/// Target Position where Mutators modify inputs 
-/// Used by the Mutators directly, for efficient multi-instance fuzzing
-pub trait HasMutatorTargetPosRand {
-    /// where to mutate (e.g. byte position in input.mutator_bytes() where something should be inserted, modified, ...)
-    fn get_target_pos(&mut self, lower_bound_incl: usize, upper_bound_excl: usize) -> usize;
-
-    /// Generate a range of values where (upon repeated calls) each index is likely to appear in the
-    /// provided range as likely as any other value.
-    /// 
-    /// Here additionally considering STATE-specific subranges for mutator target position
-    ///
-    /// This problem corresponds to: <https://oeis.org/A059036>
-    fn rand_range_for_target_pos(&mut self, upper: usize, max_len: NonZeroUsize) -> Range<usize>;
-
-    /// Given a range 0..length, get the chunk (i,j) corresponding to this (state)
-    /// (i inclusive, j exclusive)
-    #[allow(non_snake_case)]
-    fn divide_range_below(&self, length: usize, divide_by_n: usize, jth_chunk: usize) -> (usize, usize)
-    {
-        let (J, N) = (jth_chunk, divide_by_n);
-        if length <= N {
-            return (0, length)
-        } else {
-            let chunksz = (length as f32)/N as f32;
-            let start = (chunksz*(J as f32) ).round() as usize;
-            let end_excl = match J+1 == N {
-                true => length,
-                false => (chunksz*((J+1) as f32) ).round() as usize
-            };
-
-            return (start, end_excl)
-        }
-    }
-}
-
 #[cfg(feature = "introspection")]
 /// Trait for offering a [`ClientPerfStats`]
 pub trait HasClientPerfMonitor {
@@ -272,13 +239,6 @@ pub struct StdState<C, I, R, SC> {
     solutions: SC,
     #[cfg(feature = "unstable_corpus")]
     unstable_corpus: SC,
-    /// Determine more specifically WHERE to mutate.
-    /// Target (byte) positions in the input for mutators to choose from.
-    /// (J, N, prob) 
-    /// The range is not absolute! Rather it is J out of N, where J=0..N-1,
-    /// meaning the input.mutator_bytes() is to be divided into N "equal" chunks and
-    /// we cover only the Jth chunk
-    pub mutator_target_chunk: (usize, usize, f64),
     /// Metadata stored for this state by one of the components
     metadata: SerdeAnyMap,
     /// Metadata stored with names
@@ -310,64 +270,6 @@ pub struct StdState<C, I, R, SC> {
     stop_requested: bool,
     stage_stack: StageStack,
     phantom: PhantomData<I>,
-}
-
-// use std::io;
-// use std::io::Write;
-// fn print_noerr(s: &str) {
-// loop {
-//     match io::stdout().write_all(format!("{}\n", s).as_bytes()) {
-//         // Use this loop, because O_NONBLOCKING
-//         Ok(_) => break,
-//         _ => {}
-//     }
-// }
-// }
-
-impl<C, I, R, SC> HasMutatorTargetPosRand for StdState<C, I, R, SC>
-where
-    R: Rand
-{
-    fn get_target_pos(&mut self, lower_bound_incl: usize, upper_bound_excl: usize) -> usize 
-    {
-        let prob = self.mutator_target_chunk.2;
-        let (start, end_excl) = match self.rand_mut().coinflip(prob){
-            true => self.divide_range_below(upper_bound_excl-lower_bound_incl, self.mutator_target_chunk.1, self.mutator_target_chunk.0),
-            false => (0, upper_bound_excl-lower_bound_incl)
-        };
-        let sz = end_excl-start;
-        let randi = self.rand_mut().below_or_zero( sz );
-        //print_noerr(&format!("get_target_pos ({}/{}): {}-{} {}", self.mutator_target_chunk.0, self.mutator_target_chunk.1, lower_bound_incl, upper_bound_excl, lower_bound_incl + start +  randi));
-        lower_bound_incl + start +  randi
-    }
-    /// Generate a range of values where (upon repeated calls) each index is likely to appear in the
-    /// provided range as likely as any other value.
-    /// Here additionally considering STATE-specific subranges for mutator target position
-    ///
-    /// This problem corresponds to: <https://oeis.org/A059036>
-    fn rand_range_for_target_pos(&mut self, upper: usize, max_len: NonZeroUsize) -> Range<usize> {
-        let len = 1 + self.rand_mut().below(max_len);
-       
-        let actual_upper = upper + len - 1;
-        let prob = self.mutator_target_chunk.2;
-        let (start, end_excl) = match self.rand_mut().coinflip(prob){
-            true => self.divide_range_below(actual_upper, self.mutator_target_chunk.1, self.mutator_target_chunk.0),
-            false => (0, actual_upper)
-        };
-
-        let sz = end_excl-start;
-        let randi = self.rand_mut().below_or_zero( sz );
-
-        let mut offset2 = 1 + start+randi;
-
-        let offset1 = offset2.saturating_sub(len);
-        if offset2 > upper {
-            offset2 = upper;
-        }
-    
-        //print_noerr(&format!("rand_range_for_target_pos ({}/{}): {} 0-{} [{} {}]", self.mutator_target_chunk.0, self.mutator_target_chunk.1, max_len, upper, offset1, offset2));
-        offset1..offset2
-    }
 }
 
 impl<C, I, R, SC> HasRand for StdState<C, I, R, SC>
@@ -1408,7 +1310,6 @@ where
             solutions,
             #[cfg(feature = "unstable_corpus")]
             unstable_corpus,
-            mutator_target_chunk: (0,1, 1.0),
             max_size: DEFAULT_MAX_SIZE,
             stop_requested: false,
             #[cfg(feature = "introspection")]

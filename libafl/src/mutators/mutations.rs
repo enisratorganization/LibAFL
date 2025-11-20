@@ -20,7 +20,7 @@ use crate::{
     inputs::{HasMutatorBytes, ResizableMutator},
     mutators::{MutationResult, Mutator},
     nonzero, random_corpus_id_with_disabled,
-    state::{HasCorpus, HasMaxSize, HasRand, HasMutatorTargetPosRand},
+    state::{HasCorpus, HasMaxSize, HasRand},
 };
 
 /// Mem move in the own vec
@@ -128,7 +128,7 @@ pub struct BitFlipMutator;
 
 impl<I, S> Mutator<I, S> for BitFlipMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -136,8 +136,7 @@ where
             Ok(MutationResult::Skipped)
         } else {
             let bit = 1 << state.rand_mut().choose(0..8).unwrap();
-            let pos = state.get_target_pos(0, input.mutator_bytes_mut().len());
-            let byte = &mut input.mutator_bytes_mut()[pos];
+            let byte = state.rand_mut().choose(input.mutator_bytes_mut()).unwrap();
             *byte ^= bit;
             Ok(MutationResult::Mutated)
         }
@@ -173,16 +172,14 @@ pub struct ByteFlipMutator;
 
 impl<I, S> Mutator<I, S> for ByteFlipMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         if input.mutator_bytes().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
-            let pos = state.get_target_pos(0, input.mutator_bytes_mut().len());
-            let byte = &mut input.mutator_bytes_mut()[pos];
-            *byte ^= 0xff;
+            *state.rand_mut().choose(input.mutator_bytes_mut()).unwrap() ^= 0xff;
             Ok(MutationResult::Mutated)
         }
     }
@@ -217,15 +214,14 @@ pub struct ByteIncMutator;
 
 impl<I, S> Mutator<I, S> for ByteIncMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         if input.mutator_bytes().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
-            let pos = state.get_target_pos(0, input.mutator_bytes_mut().len());
-            let byte = &mut input.mutator_bytes_mut()[pos];
+            let byte = state.rand_mut().choose(input.mutator_bytes_mut()).unwrap();
             *byte = byte.wrapping_add(1);
             Ok(MutationResult::Mutated)
         }
@@ -261,15 +257,14 @@ pub struct ByteDecMutator;
 
 impl<I, S> Mutator<I, S> for ByteDecMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         if input.mutator_bytes().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
-            let pos = state.get_target_pos(0, input.mutator_bytes_mut().len());
-            let byte = &mut input.mutator_bytes_mut()[pos];
+            let byte = state.rand_mut().choose(input.mutator_bytes_mut()).unwrap();
             *byte = byte.wrapping_sub(1);
             Ok(MutationResult::Mutated)
         }
@@ -305,15 +300,14 @@ pub struct ByteNegMutator;
 
 impl<I, S> Mutator<I, S> for ByteNegMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         if input.mutator_bytes().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
-            let pos = state.get_target_pos(0, input.mutator_bytes_mut().len());
-            let byte = &mut input.mutator_bytes_mut()[pos];
+            let byte = state.rand_mut().choose(input.mutator_bytes_mut()).unwrap();
             *byte = (!(*byte)).wrapping_add(1);
             Ok(MutationResult::Mutated)
         }
@@ -349,15 +343,14 @@ pub struct ByteRandMutator;
 
 impl<I, S> Mutator<I, S> for ByteRandMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         if input.mutator_bytes().is_empty() {
             Ok(MutationResult::Skipped)
         } else {
-            let pos = state.get_target_pos(0, input.mutator_bytes_mut().len());
-            let byte = &mut input.mutator_bytes_mut()[pos];
+            let byte = state.rand_mut().choose(input.mutator_bytes_mut()).unwrap();
             *byte ^= 1 + state.rand_mut().below(nonzero!(254)) as u8;
             Ok(MutationResult::Mutated)
         }
@@ -398,7 +391,7 @@ macro_rules! add_mutator_impl {
         #[allow(trivial_numeric_casts)] // only for some calls of the macro
         impl<I, S> Mutator<I, S> for $name
         where
-            S: HasRand + HasMutatorTargetPosRand,
+            S: HasRand,
             I: HasMutatorBytes,
         {
             fn mutate(
@@ -411,9 +404,9 @@ macro_rules! add_mutator_impl {
                     Ok(MutationResult::Skipped)
                 } else {
                     // choose a random window of bytes (windows overlap) and convert to $size
-                    let index = state.get_target_pos(0, input.mutator_bytes_mut().len()- (size_of::<$size>()-1));
-                    let bytes = &mut input.mutator_bytes_mut()[index..index + size_of::<$size>()];
-
+                    let (index, bytes) = state
+                        .rand_mut()
+                        .choose(input.mutator_bytes().windows(size_of::<$size>()).enumerate()).unwrap();
                     let val = <$size>::from_ne_bytes(bytes.try_into().unwrap());
 
                     // mutate
@@ -469,7 +462,7 @@ macro_rules! interesting_mutator_impl {
 
         impl<I, S> Mutator<I, S> for $name
         where
-            S: HasRand + HasMutatorTargetPosRand,
+            S: HasRand,
             I: HasMutatorBytes,
         {
             #[expect(clippy::cast_sign_loss)]
@@ -481,8 +474,9 @@ macro_rules! interesting_mutator_impl {
                     let upper_bound = (bytes.len() + 1 - size_of::<$size>());
                     // # Safety
                     // the length is at least as large as the size here (checked above), and we add a 1 -> never zero.
-                    let idx = state.get_target_pos(0, upper_bound);
-
+                    let idx = state
+                        .rand_mut()
+                        .below(unsafe { NonZero::new(upper_bound).unwrap_unchecked() });
                     let val = *state.rand_mut().choose(&$interesting).unwrap() as $size;
                     let new_bytes = match state.rand_mut().choose(&[0, 1]).unwrap() {
                         0 => val.to_be_bytes(),
@@ -529,7 +523,7 @@ pub struct BytesDeleteMutator;
 
 impl<I, S> Mutator<I, S> for BytesDeleteMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: ResizableMutator<u8> + HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -540,7 +534,7 @@ where
 
         // # Safety
         // size - 1 is guaranteed to be larger than 0 because we abort on size <= 2 above.
-        let range = state.rand_range_for_target_pos( size, unsafe {
+        let range = rand_range(state, size, unsafe {
             NonZero::new(size - 1).unwrap_unchecked()
         });
 
@@ -579,7 +573,7 @@ pub struct BytesExpandMutator;
 
 impl<I, S> Mutator<I, S> for BytesExpandMutator
 where
-    S: HasRand + HasMutatorTargetPosRand+ HasMaxSize,
+    S: HasRand + HasMaxSize,
     I: ResizableMutator<u8> + HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -591,7 +585,7 @@ where
 
         // # Safety
         // max_size - size is larger than 0 because we check that size < max_size above
-        let range = state.rand_range_for_target_pos( size, unsafe {
+        let range = rand_range(state, size, unsafe {
             NonZero::new(min(16, max_size - size)).unwrap_unchecked()
         });
 
@@ -638,7 +632,7 @@ pub struct BytesInsertMutator;
 
 impl<I, S> Mutator<I, S> for BytesInsertMutator
 where
-    S: HasRand + HasMutatorTargetPosRand + HasMaxSize,
+    S: HasRand + HasMaxSize,
     I: ResizableMutator<u8> + HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -652,7 +646,9 @@ where
         // # Safety
         // It's a safe assumption that size + 1 is never 0.
         // If we wrap around we have _a lot_ of elements - and the code will break later anyway.
-        let offset = state.get_target_pos(0, size+1);
+        let offset = state
+            .rand_mut()
+            .below(unsafe { NonZero::new(size + 1).unwrap_unchecked() });
 
         if size + amount > max_size {
             if max_size > size {
@@ -712,7 +708,7 @@ pub struct BytesRandInsertMutator;
 
 impl<I, S> Mutator<I, S> for BytesRandInsertMutator
 where
-    S: HasRand + HasMutatorTargetPosRand + HasMaxSize,
+    S: HasRand + HasMaxSize,
     I: ResizableMutator<u8> + HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -725,7 +721,9 @@ where
         let mut amount = 1 + state.rand_mut().below(nonzero!(16));
         // # Safety
         // size + 1 can never be 0
-        let offset = state.get_target_pos(0, size+1);
+        let offset = state
+            .rand_mut()
+            .below(unsafe { NonZero::new(size.wrapping_add(1)).unwrap_unchecked() });
 
         if size + amount > max_size {
             if max_size > size {
@@ -781,7 +779,7 @@ pub struct BytesSetMutator;
 
 impl<I, S> Mutator<I, S> for BytesSetMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -791,7 +789,7 @@ where
         }
         // # Safety
         // Size is larger than 0, checked above (and 16 is also lager than 0 FWIW)
-        let range = state.rand_range_for_target_pos( size, unsafe {
+        let range = rand_range(state, size, unsafe {
             NonZero::new(min(size, 16)).unwrap_unchecked()
         });
 
@@ -832,7 +830,7 @@ pub struct BytesRandSetMutator;
 
 impl<I, S> Mutator<I, S> for BytesRandSetMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -842,7 +840,7 @@ where
         }
         // # Safety
         // Size is larger than 0, checked above. 16 is larger than 0, according to my math teacher.
-        let range = state.rand_range_for_target_pos(size, unsafe {
+        let range = rand_range(state, size, unsafe {
             NonZero::new(min(size, 16)).unwrap_unchecked()
         });
 
@@ -883,7 +881,7 @@ pub struct BytesCopyMutator;
 
 impl<I, S> Mutator<I, S> for BytesCopyMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -894,11 +892,12 @@ where
 
         // # Safety
         // size is always larger than 0 here (checked above)
-        let target = state.get_target_pos(0, size);
-
+        let target = state
+            .rand_mut()
+            .below(unsafe { NonZero::new(size).unwrap_unchecked() });
         // # Safety
         // target is smaller than size (`below` is exclusive) -> The subtraction is always larger than 0
-        let range = state.rand_range_for_target_pos( size, unsafe {
+        let range = rand_range(state, size, unsafe {
             NonZero::new(size - target).unwrap_unchecked()
         });
 
@@ -941,7 +940,7 @@ pub struct BytesInsertCopyMutator {
 
 impl<I, S> Mutator<I, S> for BytesInsertCopyMutator
 where
-    S: HasRand + HasMutatorTargetPosRand + HasMaxSize,
+    S: HasRand + HasMaxSize,
     I: ResizableMutator<u8> + HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -952,8 +951,9 @@ where
 
         // # Safety
         // We checked that size is larger than 0 above.
-        let target = state.get_target_pos(0, size);
-
+        let target = state
+            .rand_mut()
+            .below(unsafe { NonZero::new(size).unwrap_unchecked() });
         // make sure that the sampled range is both in bounds and of an acceptable size
         let max_insert_len = min(size - target, state.max_size() - size);
         let max_insert_len = min(16, max_insert_len);
@@ -962,7 +962,7 @@ where
         // size > target and state.max_size() > size
         let max_insert_len = unsafe { NonZero::new(max_insert_len).unwrap_unchecked() };
 
-        let range = state.rand_range_for_target_pos( size, max_insert_len);
+        let range = rand_range(state, size, max_insert_len);
 
         input.resize(size + range.len(), 0);
         self.tmp_buf.resize(range.len(), 0);
@@ -1025,7 +1025,7 @@ pub struct BytesSwapMutator {
 #[expect(clippy::too_many_lines)]
 impl<I, S> Mutator<I, S> for BytesSwapMutator
 where
-    S: HasRand + HasMutatorTargetPosRand,
+    S: HasRand,
     I: ResizableMutator<u8> + HasMutatorBytes,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
@@ -1036,8 +1036,7 @@ where
 
         // # Safety
         // size is larger than 0, checked above.
-        // Only the first byte range depends on STATE (the second one below can be anywhere in input)
-        let first = state.rand_range_for_target_pos( size, unsafe {
+        let first = rand_range(state, size, unsafe {
             NonZero::new(size).unwrap_unchecked()
         });
         if state.rand_mut().next() & 1 == 0 && first.start != 0 {
@@ -1281,7 +1280,7 @@ impl CrossoverInsertMutator {
 impl<I, S> Mutator<I, S> for CrossoverInsertMutator
 where
     I: ResizableMutator<u8> + HasMutatorBytes,
-    S: HasCorpus<I> + HasRand + HasMutatorTargetPosRand + HasMaxSize,
+    S: HasCorpus<I> + HasRand + HasMaxSize,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         let size = input.mutator_bytes().len();
@@ -1317,7 +1316,7 @@ where
         // # Safety
         // other_size is checked above.
         // size is smaller than max_size (also checked above) -> the subtraction result is larger than 0.
-        let range = state.rand_range_for_target_pos( other_size, unsafe {
+        let range = rand_range(state, other_size, unsafe {
             NonZero::new(min(other_size, max_size - size)).unwrap_unchecked()
         });
         let target = state.rand_mut().below(nonzero_size);
@@ -1389,7 +1388,7 @@ impl CrossoverReplaceMutator {
 impl<I, S> Mutator<I, S> for CrossoverReplaceMutator
 where
     I: HasMutatorBytes,
-    S: HasCorpus<I> + HasRand + HasMutatorTargetPosRand,
+    S: HasCorpus<I> + HasRand,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
         let size = input.mutator_bytes().len();
@@ -1422,7 +1421,7 @@ where
         // # Safety
         // other_size is checked above.
         // target is smaller than size (since below is exclusive) -> the subtraction result is larger than 0.
-        let range = state.rand_range_for_target_pos( other_size, unsafe {
+        let range = rand_range(state, other_size, unsafe {
             NonZero::new(min(other_size, size - target)).unwrap_unchecked()
         });
 
@@ -1500,7 +1499,7 @@ where
     F: Fn(&I1) -> &O,
     I2: ResizableMutator<u8> + HasMutatorBytes,
     O: IntoOptionBytes,
-    S: HasCorpus<I1> + HasMaxSize + HasRand + HasMutatorTargetPosRand,
+    S: HasCorpus<I1> + HasMaxSize + HasRand,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I2) -> Result<MutationResult, Error> {
         let size = input.mutator_bytes().len();
@@ -1532,7 +1531,7 @@ where
         // # Safety
         // other_size is checked to be larger than 0
         // max_size is checked to be larger than size, so the subtraction will always be positive and non-0
-        let range = state.rand_range_for_target_pos( other_size, unsafe {
+        let range = rand_range(state, other_size, unsafe {
             NonZero::new(min(other_size, max_size - size)).unwrap_unchecked()
         });
         // # Safety
@@ -1597,7 +1596,7 @@ where
     F: Fn(&I1) -> &O,
     I2: HasMutatorBytes,
     O: IntoOptionBytes,
-    S: HasCorpus<I1> + HasMaxSize + HasRand + HasMutatorTargetPosRand,
+    S: HasCorpus<I1> + HasMaxSize + HasRand,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I2) -> Result<MutationResult, Error> {
         let size = input.mutator_bytes().len();
@@ -1632,7 +1631,7 @@ where
         // # Safety
         // other_size is checked above to not be 0.
         // size is larger than target since below is exclusive -> subtraction is always non-0.
-        let range = state.rand_range_for_target_pos( other_size, unsafe {
+        let range = rand_range(state, other_size, unsafe {
             NonZero::new(min(other_size, size - target)).unwrap_unchecked()
         });
 
@@ -1691,7 +1690,7 @@ pub struct SpliceMutator;
 
 impl<I, S> Mutator<I, S> for SpliceMutator
 where
-    S: HasCorpus<I> + HasRand + HasMutatorTargetPosRand,
+    S: HasCorpus<I> + HasRand,
     I: ResizableMutator<u8> + HasMutatorBytes,
 {
     #[expect(clippy::cast_sign_loss)]
