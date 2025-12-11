@@ -142,8 +142,8 @@ fn configure_qemu(
         .arg("--disable-glusterfs")
         .arg("--disable-gnutls")
         // .arg("--disable-gtk")
-        // .arg("--disable-guest-agent")
-        // .arg("--disable-guest-agent-msi")
+        .arg("--disable-guest-agent")
+        .arg("--disable-guest-agent-msi")
         .arg("--disable-hvf")
         .arg("--disable-iconv")
         .arg("--disable-jack")
@@ -219,6 +219,11 @@ fn configure_qemu(
         .arg("--disable-xen-pci-passthrough")
         .arg("--disable-xkbcommon")
         .arg("--disable-zstd");
+
+        if cfg!(feature = "qemu_deterministic_dummy_timers") {
+            cmd.arg("--extra-cflags=-DDUMMY_TIMERS");
+        }
+
     }
 
     cmd

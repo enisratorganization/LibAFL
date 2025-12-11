@@ -34,6 +34,8 @@ qemu_sanitizers = [] # Enable QEMU sanitizers
 ## support coverage recording (edge observer) compiled during Qemu TCG
 qemu_inline_tcg_coverage_recording = []
 
+## deterministic dummy timers
+qemu_deterministic_dummy_timers = []
 
 paranoid_debug = [
 ] # Will perform as many checks as possible. The target will be greatly slowed down.

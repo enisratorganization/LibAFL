@@ -242,7 +242,6 @@ fn qemu_bindgen_clang_args(
 
     #[cfg(feature = "qemu_inline_tcg_coverage_recording")]
     clang_args.push("-DLIBAFL_INLINE_TCG_COVERAGE_RECORDING".to_string());
-
     clang_args
 }
 
