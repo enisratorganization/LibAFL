@@ -539,6 +539,18 @@ impl<C, CM, ED, ET, I, S, SM> Emulator<C, CM, ED, ET, I, S, SM> {
         bp_id
     }
 
+    pub fn disable_breakpoint(&self, bp_id: BreakpointId) {
+        let mut bp_map = self.breakpoints_by_id.borrow_mut();
+        let bp = bp_map.get_mut(&bp_id).expect("Did not find the breakpoint");
+        bp.disable(self.qemu);
+    }
+
+    pub fn enable_breakpoint(&self, bp_id: BreakpointId) {
+        let mut bp_map = self.breakpoints_by_id.borrow_mut();
+        let bp = bp_map.get_mut(&bp_id).expect("Did not find the breakpoint");
+        bp.enable(self.qemu);
+    }
+
     pub fn remove_breakpoint(&self, bp_id: BreakpointId) {
         let bp_addr = {
             let mut bp_map = self.breakpoints_by_id.borrow_mut();
