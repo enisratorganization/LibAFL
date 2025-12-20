@@ -6,11 +6,7 @@ use libafl_bolts::tuples::{Append, Prepend, tuple_list};
 #[cfg(feature = "systemmode")]
 use crate::FastSnapshotManager;
 use crate::{
-    Emulator, NopEmulatorDriver, NopSnapshotManager, Qemu, QemuInitError, QemuParams,
-    StdEmulatorDriver, StdSnapshotManager,
-    command::{NopCommandManager, StdCommandManager},
-    config::QemuConfigBuilder,
-    modules::{EmulatorModule, EmulatorModuleTuple},
+    Emulator, EmulatorDriver, NopEmulatorDriver, NopSnapshotManager, Qemu, QemuInitError, QemuParams, StdEmulatorDriver, StdSnapshotManager, command::{NopCommandManager, StdCommandManager}, config::QemuConfigBuilder, modules::{EmulatorModule, EmulatorModuleTuple}
 };
 #[cfg(doc)]
 use crate::{Qemu, config::QemuConfig};
@@ -50,6 +46,36 @@ impl<C, I, S>
         Self {
             modules: tuple_list!(),
             driver: NopEmulatorDriver,
+            snapshot_manager: NopSnapshotManager,
+            command_manager: NopCommandManager,
+            qemu_parameters: None,
+            phantom: PhantomData,
+        }
+    }
+}
+
+impl<C, I, S, ED>
+    EmulatorBuilder<
+        C,
+        NopCommandManager,
+        ED,
+        (),
+        QemuConfigBuilder,
+        I,
+        S,
+        NopSnapshotManager,
+    >
+where
+    ED: EmulatorDriver<C, NopCommandManager, (), I, S, NopSnapshotManager>,
+    C: Clone,
+    I: Unpin,
+    S: Unpin,
+{
+    #[must_use]
+    pub fn with_driver(ed: ED) -> Self {
+        Self {
+            modules: tuple_list!(),
+            driver: ed,
             snapshot_manager: NopSnapshotManager,
             command_manager: NopCommandManager,
             qemu_parameters: None,

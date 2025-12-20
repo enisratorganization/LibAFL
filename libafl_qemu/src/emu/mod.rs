@@ -120,12 +120,12 @@ pub struct InputLocation {
 #[derive(Debug)]
 pub struct Emulator<C, CM, ED, ET, I, S, SM> {
     snapshot_manager: SM,
-    modules: Pin<Box<EmulatorModules<ET, I, S>>>,
+    pub modules: Pin<Box<EmulatorModules<ET, I, S>>>,
     command_manager: CM,
     driver: ED,
     breakpoints_by_addr: RefCell<HashMap<GuestAddr, Breakpoint<C>>>, // TODO: change to RC here
     breakpoints_by_id: RefCell<HashMap<BreakpointId, Breakpoint<C>>>,
-    qemu: Qemu,
+    pub qemu: Qemu,
 }
 
 impl<C> EmulatorDriverResult<C> {
@@ -252,6 +252,28 @@ impl<C, I, S> Emulator<C, NopCommandManager, NopEmulatorDriver, (), I, S, NopSna
         NopSnapshotManager,
     > {
         EmulatorBuilder::empty()
+    }
+}
+
+impl<C, I, S, ED> Emulator<C, NopCommandManager, ED, (), I, S, NopSnapshotManager> 
+where
+ED: EmulatorDriver<C, NopCommandManager, (), I, S, NopSnapshotManager>,
+C: Clone,
+I: Unpin,
+S: Unpin,
+{
+    #[must_use]
+    pub fn with_driver(ed: ED) -> EmulatorBuilder<
+        C,
+        NopCommandManager,
+        ED,
+        (),
+        QemuConfigBuilder,
+        I,
+        S,
+        NopSnapshotManager,
+    > {
+        EmulatorBuilder::with_driver(ed)
     }
 }
 
@@ -471,7 +493,7 @@ where
                         .get(&bp_addr)
                         .ok_or(EmulatorExitError::BreakpointNotFound(bp_addr))?
                         .clone();
-                    EmulatorExitResult::Breakpoint(bp.clone())
+                    EmulatorExitResult::Breakpoint(bp)
                 }
                 QemuExitReason::SyncExit => EmulatorExitResult::CustomInsn(CustomInsn::new(
                     self.command_manager.parse(self.qemu)?,
