@@ -471,6 +471,9 @@ where
             #[cfg(feature = "track_hit_feedbacks")]
             self.objective_mut()
                 .append_hit_feedbacks(testcase.hit_objectives_mut())?;
+            //also append all feedback + observers metadata to solutions. We dont want to miss anything.
+            self.feedback_mut()
+                .append_metadata(state, manager, observers, &mut testcase)?;
             self.objective_mut()
                 .append_metadata(state, manager, observers, &mut testcase)?;
             state.solutions_mut().add(testcase)?;

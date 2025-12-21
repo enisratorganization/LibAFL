@@ -123,8 +123,8 @@ pub struct Emulator<C, CM, ED, ET, I, S, SM> {
     pub modules: Pin<Box<EmulatorModules<ET, I, S>>>,
     command_manager: CM,
     driver: ED,
-    breakpoints_by_addr: RefCell<HashMap<GuestAddr, Breakpoint<C>>>, // TODO: change to RC here
-    breakpoints_by_id: RefCell<HashMap<BreakpointId, Breakpoint<C>>>,
+    pub breakpoints_by_addr: RefCell<HashMap<GuestAddr, Breakpoint<C>>>, // TODO: change to RC here
+    pub breakpoints_by_id: RefCell<HashMap<BreakpointId, Breakpoint<C>>>,
     pub qemu: Qemu,
 }
 
