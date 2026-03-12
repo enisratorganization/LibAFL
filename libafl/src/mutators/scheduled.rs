@@ -2,9 +2,7 @@
 
 use alloc::{borrow::Cow, vec::Vec};
 use core::{
-    fmt::Debug,
-    num::NonZero,
-    ops::{Deref, DerefMut},
+    fmt::Debug, marker::PhantomData, num::NonZero, ops::{Deref, DerefMut}
 };
 
 use libafl_bolts::{
@@ -273,6 +271,137 @@ where
         }
     }
 }
+
+
+/// Use a user-defined closure to derive index of Mutator foreach iteration
+#[derive(Debug)]
+pub struct ExtHavocScheduledMutator<MT, S, F> {
+    name: Cow<'static, str>,
+    mutations: MT,
+    max_stack_pow: usize,
+    /// F: (state, num_mutations, iteration) -> Option<u64>
+    /// iteration argument of type i64
+    /// -1 : before all other mutations
+    /// i64::MAX: after all other mutations
+    /// _: the iteration in the mutation stack
+    /// Returns the mutator idx or None (skip)
+    get_mut_idx: F,
+    phantom: PhantomData<S>,
+}
+
+impl<MT, S, F> Named for ExtHavocScheduledMutator<MT, S, F> {
+    fn name(&self) -> &Cow<'static, str> {
+        &self.name
+    }
+}
+
+impl<I, MT, S, F> Mutator<I, S> for ExtHavocScheduledMutator< MT, S, F>
+where
+    MT: MutatorsTuple<I, S>,
+    S: HasRand,
+    F: FnMut(&mut S, usize, i64) -> Option<u64>,
+{
+    #[inline]
+    fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
+        self.scheduled_mutate(state, input)
+    }
+    #[inline]
+    fn post_exec(&mut self, _state: &mut S, _new_corpus_id: Option<CorpusId>) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+impl<MT, S, F> ComposedByMutations for ExtHavocScheduledMutator<MT, S, F> {
+    type Mutations = MT;
+    /// Get the mutations
+    #[inline]
+    fn mutations(&self) -> &MT {
+        &self.mutations
+    }
+
+    // Get the mutations (mutable)
+    #[inline]
+    fn mutations_mut(&mut self) -> &mut MT {
+        &mut self.mutations
+    }
+}
+
+impl<I, MT, S, F> ScheduledMutator<I, S> for ExtHavocScheduledMutator< MT, S, F>
+where
+    MT: MutatorsTuple<I, S>,
+    S: HasRand,
+    F: FnMut(&mut S, usize, i64) -> Option<u64>,
+{
+    /// Compute the number of iterations used to apply stacked mutations
+    fn iterations(&self, state: &mut S, _: &I) -> u64 {
+        1 << (1 + state.rand_mut().below_or_zero(self.max_stack_pow))
+    }
+
+    /// Get the next mutation to apply
+    fn schedule(&self, _state: &mut S, _: &I) -> MutationId {
+        MutationId(0)
+    }
+
+    fn scheduled_mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
+        let mut r= false;
+        let num = self.iterations(state, input);
+
+        r |= match (self.get_mut_idx)(state, self.mutations.len(), -1){
+            Some(idx) => {
+                let outcome = self.mutations_mut().get_and_mutate(idx.into(), state, input)?;
+                outcome == MutationResult::Mutated
+            },
+            None => false
+        };
+
+        for i in 0..num {
+            r |= match (self.get_mut_idx)(state, self.mutations.len(), i as i64){
+                Some(idx) => {
+                    let outcome = self.mutations_mut().get_and_mutate(idx.into(), state, input)?;
+                    outcome == MutationResult::Mutated
+                },
+                None => false
+            };
+        }
+
+        r |= match (self.get_mut_idx)(state, self.mutations.len(), i64::MAX){
+            Some(idx) => {
+                let outcome = self.mutations_mut().get_and_mutate(idx.into(), state, input)?;
+                outcome == MutationResult::Mutated
+            },
+            None => false
+        };
+
+        match r {
+            true => Ok(MutationResult::Mutated),
+            false => Ok(MutationResult::Skipped)
+        }
+    }
+}
+
+impl<MT, F, S> ExtHavocScheduledMutator< MT, S, F>
+where
+    MT: NamedTuple,
+    S: HasRand,
+    F: FnMut(&mut S, usize, i64) -> Option<u64>,
+{
+    /// Create a new [`ExtHavocScheduledMutator`] instance specifying mutations and the maximun number of iterations
+    #[inline]
+    pub fn with_max_stack_pow(mutations: MT, max_stack_pow: usize, get_mut_idx: F) -> Self 
+    {
+        Self {
+            name: Cow::from(format!(
+                "ExtHavocScheduledMutator[{}]",
+                mutations.names().join(", ")
+            )),
+            mutations,
+            max_stack_pow,
+            get_mut_idx,
+            phantom: PhantomData,
+        }
+    }
+}
+
 
 /// Get the mutations that uses the Tokens metadata
 #[must_use]

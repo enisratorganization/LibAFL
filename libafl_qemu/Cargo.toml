@@ -98,6 +98,9 @@ shared = ["libafl_qemu_sys/shared"]
 ## clippy workaround
 clippy = ["libafl_qemu_sys/clippy"]
 
+qemu_deterministic_dummy_timers = ["libafl_qemu_sys/qemu_deterministic_dummy_timers"]
+qemu_inline_tcg_coverage_recording = ["libafl_qemu_sys/qemu_inline_tcg_coverage_recording"]
+
 [dependencies]
 libafl = { workspace = true, features = ["std", "derive", "regex"] }
 libafl_bolts = { workspace = true, features = ["std", "derive"] }
