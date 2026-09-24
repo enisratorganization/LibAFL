@@ -280,10 +280,12 @@ pub struct ExtHavocScheduledMutator<MT, S, F> {
     mutations: MT,
     max_stack_pow: usize,
     /// F: (state, num_mutations, iteration) -> Option<u64>
-    /// iteration argument of type i64
-    /// -1 : before all other mutations
-    /// i64::MAX: after all other mutations
-    /// _: the iteration in the mutation stack
+    /// User-supplied function to get the index of the mutator to use.
+    /// Can be used for user-defined weighting. Also, first and last step are specially marked, see below.
+    /// @iteration argument of type i64
+    ///   -1 : before all other mutations
+    ///   i64::MAX: after all other mutations
+    ///   _: the iteration in the "usual" mutation stack
     /// Returns the mutator idx or None (skip)
     get_mut_idx: F,
     phantom: PhantomData<S>,
