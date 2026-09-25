@@ -31,6 +31,11 @@ pub use tuneable::*;
 #[cfg(feature = "lua_mutator")]
 pub mod lua;
 
+#[cfg(all(feature = "std", unix))]
+pub mod external;
+#[cfg(all(feature = "std", unix))]
+pub use external::ExternalProcessMutator;
+
 #[cfg(feature = "std")]
 pub mod hash;
 #[cfg(feature = "std")]

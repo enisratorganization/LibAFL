@@ -258,6 +258,7 @@ nix = { workspace = true, optional = true, features = [
   "ptrace",
   "personality",
   "fs",
+  "poll",
 ] }
 regex = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["serde", "v4"] }

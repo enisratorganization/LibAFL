@@ -1,13 +1,15 @@
 //! All the map observer variants
-use std::string::String;
 use alloc::{borrow::Cow, vec::Vec};
 use core::{
     fmt::Debug,
     hash::{Hash, Hasher},
     ops::{Deref, DerefMut},
 };
+use std::string::String;
 
-use libafl_bolts::{AsSlice, AsSliceMut, HasLen, Named, Truncate, ownedref::OwnedMutSlice, ErrorBacktrace};
+use libafl_bolts::{
+    AsSlice, AsSliceMut, ErrorBacktrace, HasLen, Named, Truncate, ownedref::OwnedMutSlice,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
@@ -361,10 +363,12 @@ pub trait MapObserver:
     type Entry: PartialEq + Copy;
 
     /// Ignore these indices (set to initial after exec)
-    fn ignore(&mut self, _indices: &[usize]) { }
+    fn ignore(&mut self, _indices: &[usize]) {}
 
     /// is this idx ignored?
-    fn is_ignored(&self, _idx: &usize) -> bool { false }
+    fn is_ignored(&self, _idx: &usize) -> bool {
+        false
+    }
 
     /// process given ignore list after exec
     fn process_ignore_list(&mut self, ignore_indices: &[usize]) {
@@ -400,17 +404,24 @@ pub trait MapObserver:
     /// compare to other map and get the Vec of mismatched entries
     fn compare(&self, other: &Self) -> Result<Vec<usize>, Error> {
         if self.name() != other.name() {
-            return Err(Error::Unsupported(String::from("MapObserver names do not match"), ErrorBacktrace::new()));
+            return Err(Error::Unsupported(
+                String::from("MapObserver names do not match"),
+                ErrorBacktrace::new(),
+            ));
         }
         let sz = self.usable_count();
         if sz != other.usable_count() {
-            return Err(Error::Unsupported(String::from("MapObserver usable_count() do not match"), ErrorBacktrace::new()));
+            return Err(Error::Unsupported(
+                String::from("MapObserver usable_count() do not match"),
+                ErrorBacktrace::new(),
+            ));
         }
 
         let mut mismatched: Vec<usize> = vec![];
 
         for idx in 0..sz {
-            if self.get(idx) != other.get(idx) && !self.is_ignored(&idx) && !other.is_ignored(&idx) {
+            if self.get(idx) != other.get(idx) && !self.is_ignored(&idx) && !other.is_ignored(&idx)
+            {
                 mismatched.push(idx);
             }
         }

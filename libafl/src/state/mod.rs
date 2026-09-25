@@ -28,9 +28,9 @@ mod stack;
 pub use stack::StageStack;
 
 #[cfg(feature = "std")]
-use crate::fuzzer::ExecuteInputResult;
-#[cfg(feature = "std")]
 use crate::executors::HasObservers;
+#[cfg(feature = "std")]
+use crate::fuzzer::ExecuteInputResult;
 #[cfg(feature = "introspection")]
 use crate::monitors::stats::ClientPerfStats;
 use crate::{
@@ -1084,7 +1084,7 @@ where
         executor: &mut E,
         mgr: &mut EM,
         map_feedback: &F,
-        iterations: u32
+        iterations: u32,
     ) -> Result<(), Error>
     where
         E: Executor<EM, I, Self, Z> + HasObservers<Observers = OT>,
@@ -1100,13 +1100,12 @@ where
         let mut unstable_entries: Vec<usize> = vec![];
 
         for id in self.corpus.ids().collect::<Vec<_>>() {
-
             let input_maybe_empty = {
                 let testcase = self.corpus().get(id)?.borrow();
                 testcase.input().clone()
             };
 
-            if let Some(input) = input_maybe_empty{
+            if let Some(input) = input_maybe_empty {
                 // Run once to get the initial calibration map
                 executor.observers_mut().pre_exec_all(self, &input)?;
                 let exit_kind = executor.run_target(fuzzer, self, mgr, &input)?;
@@ -1174,19 +1173,20 @@ where
         mgr.fire(
             self,
             EventWithStats::with_current_time(
-            Event::Log {
-                severity_level: LogSeverity::Debug,
-                message: format!(
-                    "Ignoring {} edges, edge ids: {}",
-                    unstable_entries.len(),
-                    unstable_entries
-                        .iter()
-                        .map(|&x| x.to_string() + ",")
-                        .collect::<String>()
-                ),
-                phantom: PhantomData::<I>,
-            },
-            *self.executions()),
+                Event::Log {
+                    severity_level: LogSeverity::Debug,
+                    message: format!(
+                        "Ignoring {} edges, edge ids: {}",
+                        unstable_entries.len(),
+                        unstable_entries
+                            .iter()
+                            .map(|&x| x.to_string() + ",")
+                            .collect::<String>()
+                    ),
+                    phantom: PhantomData::<I>,
+                },
+                *self.executions(),
+            ),
         )?;
 
         Ok(())
@@ -1288,8 +1288,7 @@ where
         rand: R,
         corpus: C,
         solutions: SC,
-        #[cfg(feature = "unstable_corpus")]
-        unstable_corpus: SC,
+        #[cfg(feature = "unstable_corpus")] unstable_corpus: SC,
         feedback: &mut F,
         objective: &mut O,
     ) -> Result<Self, Error>
@@ -1331,7 +1330,6 @@ where
         Ok(state)
     }
 }
-
 
 impl StdState<InMemoryCorpus<NopInput>, NopInput, StdRand, InMemoryCorpus<NopInput>> {
     /// Create an empty [`StdState`] that has very minimal uses.

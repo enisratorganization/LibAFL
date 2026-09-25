@@ -1,0 +1,30 @@
+[package]
+name = "baby_fuzzer_external_mutator"
+version = "0.14.1"
+authors = [
+  "Andrea Fioraldi <andreafioraldi@gmail.com>",
+  "Dominik Maier <domenukk@gmail.com>",
+]
+edition = "2021"
+
+[features]
+tui = []
+## Fuzz a `MultipartInput` (`header` and `payload` parts) instead of a `BytesInput`
+multipart = ["libafl/multipart_inputs"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = true
+
+[dependencies]
+env_logger = "0.11.7"
+libafl = { path = "../../../libafl", features = ["tui_monitor"] }
+libafl_bolts = { path = "../../../libafl_bolts" }
+# No `release_max_level_info` here, so that the debug logs of the external mutator are available in release builds.
+log = { version = "0.4.22" }

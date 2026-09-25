@@ -1093,13 +1093,40 @@ impl<IC> StdFuzzerBuilder<IC, ()> {
 }
 
 impl<IC, IF> StdFuzzerBuilder<IC, IF> {
-    /// build it
+
+    #[cfg(not(feature = "stability_check_on_reception"))] 
+    /// build without feature
+    pub fn build<CS, F, OF>(
+        self,
+        scheduler: CS,
+        feedback: F,
+        objective: OF,
+    ) -> Result<StdFuzzer<CS, F, IC, IF, OF, &'static ConstMapObserver<'static, u8, 0>, ConstMapObserver<'static, u8, 0>>, Error> {
+        let Some(bytes_converter) = self.bytes_converter else {
+            return Err(Error::illegal_argument("input converter not set"));
+        };
+        let Some(input_filter) = self.input_filter else {
+            return Err(Error::illegal_argument("input filter not set"));
+        };
+
+        Ok(StdFuzzer {
+            bytes_converter,
+            input_filter,
+            scheduler,
+            feedback,
+            objective,
+            share_objectives: false,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// build with stability_check_on_reception, two new template params
+    #[cfg(feature = "stability_check_on_reception")] 
     pub fn build<CS, F, OF, C, MF>(
         self,
         scheduler: CS,
         feedback: F,
         objective: OF,
-        #[cfg(feature = "stability_check_on_reception")] 
         map_handle_for_instability_check: Handle<C>,
     ) -> Result<StdFuzzer<CS, F, IC, IF, OF, C, MF>, Error> {
         let Some(bytes_converter) = self.bytes_converter else {
@@ -1116,7 +1143,6 @@ impl<IC, IF> StdFuzzerBuilder<IC, IF> {
             feedback,
             objective,
             share_objectives: false,
-            #[cfg(feature = "stability_check_on_reception")]
             map_handle_for_instability_check,
             _phantom: PhantomData,
         })
