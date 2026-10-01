@@ -3,25 +3,45 @@
 //! The external program is spawned once, with the [`EXTERNAL_MUTATOR_SWITCH`] (i.e., `--mutator`)
 //! appended to its arguments, and then talks to the fuzzer through a simple line-based protocol.
 //!
-//! Each line consists of fields, separated by *exactly one* space (`' '`), and is terminated by `\n`:
+//! Each line is terminated by `\n` and consists of *sections*, separated by *exactly one* tab (`'\t'`).
+//! Inside a section, *fields* are separated by *exactly one* space (`' '`). Empty fields are valid.
 //!
-//! 1. For each call to [`Mutator::mutate`], the fuzzer writes a request line to the program's `stdin`:
-//!    - the first field is the request id, a `u64` in (lowercase) hex, without `0x` prefix,
-//!    - the following fields describe the input, encoded as hex (see below).
-//! 2. The program answers with exactly one reply line on its `stdout`, in the same format:
-//!    - the first field must be the id of the request, otherwise the program is respawned,
-//!    - the following fields describe the mutated input.
-//!      A reply consisting only of the id means "no mutation" and results in [`MutationResult::Skipped`].
+//! 1. For each call to [`Mutator::mutate`], the fuzzer writes a request line to the program's `stdin`.
+//!    It *always* has three sections, `<id>\t<state>\t<input>`:
+//!    - the request id: a `u64` in (lowercase) hex, without `0x` prefix,
+//!    - the state entries (see below), which is empty if no
+//!      [state entries](ExternalProcessMutator::with_state_entry) are configured,
+//!    - the fields describing the input, encoded as hex (see below).
+//! 2. The program answers with exactly one reply line on its `stdout`, `<id>\t<input>`:
+//!    - the id must be the id of the request, otherwise the program is respawned,
+//!    - the fields describing the mutated input, in the same format as in the request.
+//!      A reply consisting only of the id (no tab) means "no mutation" and results in [`MutationResult::Skipped`].
 //! 3. Anything written to `stderr` is logged with `warn` severity.
 //!    If [`ExternalProcessMutator::kill_on_stderr`] is set, the program is also killed and respawned
 //!    (and the mutation is [`MutationResult::Skipped`]).
 //!
+//! # State entries
+//!
+//! Stateful fuzzers can pass selected entries of the fuzzer's state to the program, to be able to
+//! base the mutation on them. This works for every [`HasNamedMetadata`] state.
+//! Select the entries by their name *and type* with [`ExternalProcessMutator::with_state_entry`],
+//! once for each entry (nothing is sent by default).
+//! The state section consists of a pair of fields for each selected entry that currently exists
+//! (entries that are not in the state are skipped), in the order of the configuration:
+//! the entry's name (as hex), and its value, formatted with [`core::fmt::Debug`] (as hex).
+//! The program is free to ignore them. State entries are never sent back.
+//!
+//! For example, with the state entry `round` (a metadata `Round(5)`, `Debug`: `Round(5)`),
+//! the bytes input `abc` with id `1f` is sent as `1f\t726f756e64 526f756e64283529\t616263`,
+//! and without any state key as `1f\t\t616263`.
+//!
+//! # Input fields
+//!
 //! The fields describing the input depend on the input type:
 //! - Bytes inputs ([`HasMutatorBytes`], e.g., [`crate::inputs::BytesInput`]): a single field, the bytes.
-//!   For example, input `abc` with id `1f` is sent as `1f 616263`.
 //! - `MultipartInput<I, K>` (feature `multipart_inputs`): a pair of fields for each part,
 //!   the key (formatted with [`core::fmt::Debug`], as hex) and the part's bytes (as hex).
-//!   For example, the parts `[("a", "xy"), ("b", "")]` with id `2` are sent as `2 226122 7879 226222 `
+//!   For example, the parts `[("a", "xy"), ("b", "")]` with id `2` are sent as `2\t\t226122 7879 226222 `
 //!   (`"a"`, with quotes, is the `Debug` representation of the `String` key `a`; note the empty last field).
 //!   Every key in the reply has to be one of the input's keys, but parts may be reordered, removed, or duplicated.
 //!
@@ -59,7 +79,10 @@ use std::{
     time::Instant,
 };
 
-use libafl_bolts::{Error, Named};
+use libafl_bolts::{
+    Error, Named,
+    serdeany::{NamedSerdeAnyMap, SerdeAny},
+};
 use nix::{
     errno::Errno,
     poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -70,6 +93,7 @@ use super::{MutationResult, Mutator};
 #[cfg(feature = "multipart_inputs")]
 use crate::inputs::MultipartInput;
 use crate::{
+    HasNamedMetadata,
     corpus::CorpusId,
     inputs::{HasMutatorBytes, ResizableMutator},
     state::HasMaxSize,
@@ -126,6 +150,13 @@ struct Pending {
     kill_for_stderr: bool,
     /// The process exited or closed its stdout
     exited: bool,
+}
+
+/// Gets the `Debug` representation of the named metadata entry of a fixed type, if it exists
+type StateGetter = fn(&NamedSerdeAnyMap, &str) -> Option<String>;
+
+fn get_state_entry<T: SerdeAny>(map: &NamedSerdeAnyMap, name: &str) -> Option<String> {
+    map.get::<T>(name).map(|value| format!("{value:?}"))
 }
 
 /// A running instance of the external mutator process, including its I/O threads.
@@ -194,20 +225,22 @@ impl Drop for ExternalProcess {
     }
 }
 
-/// Encodes a request line: the `id`, followed by the hex-encoded `fields`, separated by single spaces.
-fn encode_request(id: u64, fields: &[&[u8]]) -> Vec<u8> {
-    let mut line = format!("{id:x}").into_bytes();
-    for field in fields {
-        line.push(b' ');
-        line.extend_from_slice(hex::encode(field).as_bytes());
-    }
-    line.push(b'\n');
-    line
+/// Encodes a request line: `<id>\t<state>\t<input>`, with the hex-encoded `state` and `input` fields
+/// (separated by single spaces).
+fn encode_request(id: u64, state: &[&[u8]], input: &[&[u8]]) -> Vec<u8> {
+    let encode_section =
+        |fields: &[&[u8]]| fields.iter().map(hex::encode).collect::<Vec<_>>().join(" ");
+    format!(
+        "{id:x}\t{}\t{}\n",
+        encode_section(state),
+        encode_section(input)
+    )
+    .into_bytes()
 }
 
-/// Splits a reply line into the id field and the rest of the line (`None` if the line has no other fields).
+/// Splits a reply line into the id field and the rest of the line (`None` if the line has no tab).
 fn split_id(line: &[u8]) -> (&[u8], Option<&[u8]>) {
-    match line.iter().position(|&b| b == b' ') {
+    match line.iter().position(|&b| b == b'\t') {
         Some(pos) => (&line[..pos], Some(&line[pos + 1..])),
         None => (line, None),
     }
@@ -223,7 +256,7 @@ fn parse_id(field: &[u8]) -> Option<u64> {
     u64::from_str_radix(field, 16).ok()
 }
 
-/// Decodes the hex fields (separated by single spaces) following the id in a reply.
+/// Decodes the hex fields (separated by single spaces) of the input section in a reply.
 /// Empty fields are valid (empty bytes).
 fn decode_fields(payload: Option<&[u8]>) -> Result<Vec<Vec<u8>>, hex::FromHexError> {
     payload.map_or_else(
@@ -404,7 +437,11 @@ fn spawn_stdin_writer(
 /// // Runs `python3 ./mutator.py --mutator`
 /// let mutator = ExternalProcessMutator::new("python3", ["./mutator.py"])?
 ///     .with_timeout(Duration::from_millis(500))
-///     .with_kill_on_stderr(false);
+///     .with_kill_on_stderr(false)
+///     // Also send the state's named metadata entries "round" (a `Round`) and "phase" (a `Phase`)
+///     // with every request
+///     .with_state_entry::<Round>("round")
+///     .with_state_entry::<Phase>("phase");
 /// let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 /// ```
 #[derive(Debug)]
@@ -415,6 +452,8 @@ pub struct ExternalProcessMutator {
     timeout: Duration,
     startup_timeout: Duration,
     kill_on_stderr: bool,
+    /// The state's named metadata entries that are sent with every request: names and (typed) getters
+    state_entries: Vec<(String, StateGetter)>,
     process: Option<ExternalProcess>,
     spawn_count: usize,
     /// The id of the next request
@@ -445,6 +484,7 @@ impl ExternalProcessMutator {
             timeout: DEFAULT_EXTERNAL_MUTATOR_TIMEOUT,
             startup_timeout: DEFAULT_EXTERNAL_MUTATOR_STARTUP_TIMEOUT,
             kill_on_stderr: false,
+            state_entries: Vec::new(),
             process: None,
             spawn_count: 0,
             next_id: 0,
@@ -477,6 +517,19 @@ impl ExternalProcessMutator {
         self
     }
 
+    /// Sends the entry `name` of the state's named metadata ([`HasNamedMetadata`]), of type `T`,
+    /// to the external process with every request. Call it once for each entry to send.
+    /// By default, no state entries are sent.
+    ///
+    /// The entry is sent as its name and its [`core::fmt::Debug`] representation,
+    /// see the [module-level documentation](self). An entry that doesn't exist in the state
+    /// (with this name and type) is skipped.
+    #[must_use]
+    pub fn with_state_entry<T: SerdeAny>(mut self, name: impl Into<String>) -> Self {
+        self.state_entries.push((name.into(), get_state_entry::<T>));
+        self
+    }
+
     /// Sets a custom name for this mutator.
     #[must_use]
     pub fn with_name<N>(mut self, name: N) -> Self
@@ -485,6 +538,11 @@ impl ExternalProcessMutator {
     {
         self.name = name.into();
         self
+    }
+
+    /// The names of the state's named metadata entries that are sent with every request
+    pub fn state_keys(&self) -> impl Iterator<Item = &str> {
+        self.state_entries.iter().map(|(name, _)| name.as_str())
     }
 
     /// The timeout for a single mutation roundtrip
@@ -755,10 +813,15 @@ impl ExternalProcessMutator {
 
     /// Performs one request/reply exchange with the external process, handling all errors.
     ///
-    /// The `fields` are sent hex-encoded (after a fresh request id), and the fields of the reply
-    /// are returned decoded. Returns `None` if the mutation has to be skipped (timeout, crash,
-    /// stderr output with [`Self::kill_on_stderr`], wrong id, invalid hex, or an unchanged reply).
-    fn exchange(&mut self, fields: &[&[u8]]) -> Result<Option<Vec<Vec<u8>>>, Error> {
+    /// The selected entries of the `state` and the input `fields` are sent hex-encoded (after a fresh
+    /// request id), and the input fields of the reply are returned decoded. Returns `None` if the mutation
+    /// has to be skipped (timeout, crash, stderr output with [`Self::kill_on_stderr`], wrong id,
+    /// invalid hex, or an unchanged reply).
+    fn exchange<S: HasNamedMetadata>(
+        &mut self,
+        state: &S,
+        fields: &[&[u8]],
+    ) -> Result<Option<Vec<Vec<u8>>>, Error> {
         // Make sure a healthy process is running, and get rid of leftovers from previous rounds.
         if self.process.is_none() {
             self.spawn()?;
@@ -772,10 +835,13 @@ impl ExternalProcessMutator {
 
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        let request = encode_request(id, fields);
+        let state_fields = self.state_fields(state);
+        let state_fields: Vec<&[u8]> = state_fields.iter().map(Vec::as_slice).collect();
+        let request = encode_request(id, &state_fields, fields);
         log::debug!(
-            "{}: sending request {id:x} with {} field(s), {} bytes, to external mutator (pid {:?})",
+            "{}: sending request {id:x} with {} state field(s) and {} input field(s), {} bytes, to external mutator (pid {:?})",
             self.name,
+            state_fields.len(),
             fields.len(),
             request.len(),
             self.pid()
@@ -856,6 +922,20 @@ impl ExternalProcessMutator {
         }
     }
 
+    /// The names and `Debug` representations of the selected named metadata entries of the `state`
+    fn state_fields<S: HasNamedMetadata>(&self, state: &S) -> Vec<Vec<u8>> {
+        let mut fields = Vec::new();
+        for (name, get) in &self.state_entries {
+            if let Some(value) = get(state.named_metadata_map(), name) {
+                fields.push(name.clone().into_bytes());
+                fields.push(value.into_bytes());
+            } else {
+                log::debug!("{}: state has no metadata named {name:?}", self.name);
+            }
+        }
+        fields
+    }
+
     /// Checks if the mutated bytes of a (part of an) input exceed the max size.
     fn exceeds_max_size(&self, len: usize, max_size: usize) -> bool {
         if len > max_size {
@@ -887,14 +967,15 @@ impl Named for ExternalProcessMutator {
     }
 }
 
-/// Mutates inputs consisting of bytes: the request and reply carry exactly one field (the bytes).
+/// Mutates inputs consisting of bytes: the input section of the request and reply carries exactly one field
+/// (the bytes).
 impl<I, S> Mutator<I, S> for ExternalProcessMutator
 where
     I: HasMutatorBytes + ResizableMutator<u8>,
-    S: HasMaxSize,
+    S: HasMaxSize + HasNamedMetadata,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
-        let Some(reply) = self.exchange(&[input.mutator_bytes()])? else {
+        let Some(reply) = self.exchange(state, &[input.mutator_bytes()])? else {
             return Ok(MutationResult::Skipped);
         };
         let mutated = match reply.as_slice() {
@@ -935,7 +1016,7 @@ where
     }
 }
 
-/// Mutates a [`MultipartInput`]: the request and reply carry a pair of fields for each part,
+/// Mutates a [`MultipartInput`]: the input section of the request and reply carries a pair of fields for each part,
 /// the key (formatted with [`Debug`]) and the part's bytes.
 ///
 /// Since keys can't be created from strings, each key in the reply has to match (the [`Debug`]
@@ -946,7 +1027,7 @@ impl<I, K, S> Mutator<MultipartInput<I, K>, S> for ExternalProcessMutator
 where
     I: HasMutatorBytes + ResizableMutator<u8> + Clone,
     K: Debug + Clone,
-    S: HasMaxSize,
+    S: HasMaxSize + HasNamedMetadata,
 {
     fn mutate(
         &mut self,
@@ -964,7 +1045,7 @@ where
             .zip(&keys)
             .flat_map(|((_, part), key)| [key.as_bytes(), part.mutator_bytes()])
             .collect();
-        let Some(reply) = self.exchange(&fields)? else {
+        let Some(reply) = self.exchange(state, &fields)? else {
             return Ok(MutationResult::Skipped);
         };
         if reply.is_empty() {
@@ -1026,19 +1107,33 @@ mod tests {
     use core::time::Duration;
     use std::time::Instant;
 
+    use serde::{Deserialize, Serialize};
+
     use super::{ExternalProcessMutator, decode_fields, encode_request, parse_id, split_id};
     use crate::{
+        HasNamedMetadata,
         inputs::{BytesInput, HasMutatorBytes},
         mutators::{MutationResult, Mutator},
         state::NopState,
     };
 
-    /// Creates a mutator running the given shell script.
+    /// Shell functions available to the scripts of [`sh`]:
+    /// - `req` reads a request line into `$id`, `$st` (state section), and `$l` (input section),
+    ///   (`read` can't be used, since it collapses the tabs),
+    /// - `rep <input>` answers with `$id` and the given input section.
+    const PRELUDE: &str = r#"
+        T=$(printf '\t')
+        req() {
+            IFS= read -r line || return
+            id=${line%%"$T"*}; rest=${line#*"$T"}; st=${rest%%"$T"*}; l=${rest#*"$T"}
+        }
+        rep() { printf '%s\t%s\n' "$id" "$1"; }
+    "#;
+
+    /// Creates a mutator running the given shell script (after the [`PRELUDE`]).
     /// Inside the script, `$0` is `sh`, and `$1` is the appended `--mutator` switch.
-    ///
-    /// Note: `read id l` splits a request into the id and the rest of the line.
     fn sh(script: &str) -> ExternalProcessMutator {
-        ExternalProcessMutator::new("sh", ["-c", script, "sh"])
+        ExternalProcessMutator::new("sh", ["-c", &format!("{PRELUDE}{script}"), "sh"])
             .unwrap()
             .with_timeout(Duration::from_secs(5))
     }
@@ -1065,17 +1160,27 @@ mod tests {
 
     #[test]
     fn test_encode_and_parse() {
-        assert_eq!(encode_request(0x1f, &[b"abc"]), b"1f 616263\n");
+        assert_eq!(encode_request(0x1f, &[], &[b"abc"]), b"1f\t\t616263\n");
         assert_eq!(
-            encode_request(2, &[b"\"a\"", b"xy", b"\"b\"", b""]),
-            b"2 226122 7879 226222 \n"
+            encode_request(0x1f, &[b"round", b"5"], &[b"abc"]),
+            b"1f\t726f756e64 35\t616263\n"
         );
-        assert_eq!(encode_request(5, &[]), b"5\n");
-        assert_eq!(encode_request(u64::MAX, &[b""]), b"ffffffffffffffff \n");
+        assert_eq!(
+            encode_request(2, &[], &[b"\"a\"", b"xy", b"\"b\"", b""]),
+            b"2\t\t226122 7879 226222 \n"
+        );
+        assert_eq!(encode_request(5, &[], &[]), b"5\t\t\n");
+        assert_eq!(encode_request(5, &[b"", b""], &[]), b"5\t \t\n");
+        assert_eq!(
+            encode_request(u64::MAX, &[], &[b""]),
+            b"ffffffffffffffff\t\t\n"
+        );
 
-        assert_eq!(split_id(b"1f 6162"), (&b"1f"[..], Some(&b"6162"[..])));
-        assert_eq!(split_id(b"1f "), (&b"1f"[..], Some(&b""[..])));
+        assert_eq!(split_id(b"1f\t6162"), (&b"1f"[..], Some(&b"6162"[..])));
+        assert_eq!(split_id(b"1f\t"), (&b"1f"[..], Some(&b""[..])));
         assert_eq!(split_id(b"1f"), (&b"1f"[..], None));
+        // Spaces don't separate the id
+        assert_eq!(split_id(b"1f 6162"), (&b"1f 6162"[..], None));
 
         assert_eq!(parse_id(b"1f"), Some(0x1f));
         assert_eq!(parse_id(b"FF"), Some(0xff));
@@ -1095,11 +1200,58 @@ mod tests {
         assert!(decode_fields(Some(b"zz")).is_err());
     }
 
+    /// A metadata for the state tests, `Debug`: `TestMeta(5)`
+    #[derive(Debug, Serialize, Deserialize)]
+    struct TestMeta(u32);
+    libafl_bolts::impl_serdeany!(TestMeta);
+
+    /// Another metadata type, to test that the type matters
+    #[derive(Debug, Serialize, Deserialize)]
+    struct OtherMeta;
+    libafl_bolts::impl_serdeany!(OtherMeta);
+
+    #[test]
+    fn test_state_entries() {
+        // `named`/`TestMeta(5)` and `other`/`TestMeta(7)` as hex, in the order of the keys. "missing" doesn't exist: skipped.
+        let expected = "6e616d6564 546573744d657461283529 6f74686572 546573744d657461283729";
+        let mut state = NopState::<BytesInput>::new();
+        state.add_named_metadata("named", TestMeta(5));
+        state.add_named_metadata("other", TestMeta(7));
+
+        // The script only answers if the state section has the expected content.
+        let script = format!(r#"while req; do [ "$st" = "{expected}" ] && rep "41$l"; done"#);
+        let mut mutator = sh(&script)
+            .with_state_entry::<TestMeta>("named")
+            .with_state_entry::<TestMeta>("missing")
+            .with_state_entry::<TestMeta>("other")
+            // The entry exists, but with another type
+            .with_state_entry::<OtherMeta>("named");
+        assert_eq!(
+            mutator.state_keys().collect::<Vec<_>>(),
+            ["named", "missing", "other", "named"]
+        );
+        let mut input = BytesInput::new(b"b".to_vec());
+        assert_eq!(
+            mutator.mutate(&mut state, &mut input).unwrap(),
+            MutationResult::Mutated
+        );
+        assert_eq!(input.mutator_bytes(), b"Ab");
+        assert_eq!(mutator.spawn_count(), 1);
+
+        // Without selected keys, the state section is empty, even if the state has entries.
+        let mut mutator = sh(r#"while req; do [ -z "$st" ] && rep "41$l"; done"#);
+        assert_eq!(
+            mutator.mutate(&mut state, &mut input).unwrap(),
+            MutationResult::Mutated
+        );
+        assert_eq!(input.mutator_bytes(), b"AAb");
+    }
+
     #[test]
     fn test_mutator_switch() {
         // Replies with "ok" as hex if the `--mutator` switch was passed as last (and only) argument
         let (result, bytes, _) = mutate_once(
-            r#"read id l; [ "$#" = 1 ] && [ "$1" = --mutator ] && echo "$id 6f6b"; sleep 5"#,
+            r#"req; [ "$#" = 1 ] && [ "$1" = --mutator ] && rep 6f6b; sleep 5"#,
             b"x",
         );
         assert_eq!(result, MutationResult::Mutated);
@@ -1109,9 +1261,8 @@ mod tests {
     #[test]
     fn test_mutated_and_unchanged() {
         // Prepends 'A' to all inputs of length 1, returns everything else as-is.
-        let mut mutator = sh(
-            r#"while read id l; do if [ ${#l} -eq 2 ]; then echo "$id 41$l"; else echo "$id $l"; fi; done"#,
-        );
+        let mut mutator =
+            sh(r#"while req; do if [ ${#l} -eq 2 ]; then rep "41$l"; else rep "$l"; fi; done"#);
         let mut input = BytesInput::new(b"b".to_vec());
         assert_eq!(run(&mut mutator, &mut input), MutationResult::Mutated);
         assert_eq!(input.mutator_bytes(), b"Ab");
@@ -1125,7 +1276,7 @@ mod tests {
     fn test_request_ids() {
         // Only answers if the ids are consecutive (as hex, starting at 0), otherwise times out.
         let mut mutator = sh(
-            r#"n=0; while read id l; do [ "$id" = "$(printf %x $n)" ] && echo "$id 41$l"; n=$((n+1)); done"#,
+            r#"n=0; while req; do [ "$id" = "$(printf %x $n)" ] && rep "41$l"; n=$((n+1)); done"#,
         );
         let mut input = BytesInput::new(b"b".to_vec());
         for _ in 0..20 {
@@ -1137,15 +1288,14 @@ mod tests {
 
     #[test]
     fn test_wrong_id_respawns() {
-        let mut mutator = sh(r#"while read id l; do echo "ff$id 41$l"; done"#);
+        let mut mutator = sh(r#"while req; do printf 'ff%s\t41%s\n' "$id" "$l"; done"#);
         let mut input = BytesInput::new(b"b".to_vec());
         assert_eq!(run(&mut mutator, &mut input), MutationResult::Skipped);
         assert_eq!(input.mutator_bytes(), b"b");
         assert_eq!(mutator.spawn_count(), 2);
 
         // A reply without any id respawns, too
-        let (result, bytes, spawn_count) =
-            mutate_once("while read id l; do echo nothex; done", b"b");
+        let (result, bytes, spawn_count) = mutate_once("while req; do echo nothex; done", b"b");
         assert_eq!(
             (result, &bytes[..], spawn_count),
             (MutationResult::Skipped, &b"b"[..], 2)
@@ -1155,7 +1305,7 @@ mod tests {
     #[test]
     fn test_stale_reply_is_never_applied() {
         // Answers every request twice, the second answer must never be used for the next request.
-        let mut mutator = sh(r#"while read id l; do echo "$id 41$l"; echo "$id 42$l"; done"#);
+        let mut mutator = sh(r#"while req; do rep "41$l"; rep "42$l"; done"#);
         let mut input = BytesInput::new(b"b".to_vec());
         assert_eq!(run(&mut mutator, &mut input), MutationResult::Mutated);
         assert_eq!(input.mutator_bytes(), b"Ab");
@@ -1191,7 +1341,7 @@ mod tests {
     #[test]
     fn test_startup_timeout() {
         // Slow startup: the first request needs the startup timeout, later ones are fast.
-        let mut mutator = sh(r#"sleep 0.3; while read id l; do echo "$id 41$l"; done"#)
+        let mut mutator = sh(r#"sleep 0.3; while req; do rep "41$l"; done"#)
             .with_timeout(Duration::from_millis(100))
             .with_startup_timeout(Duration::from_secs(5));
         let mut input = BytesInput::new(b"b".to_vec());
@@ -1221,7 +1371,7 @@ mod tests {
     #[test]
     fn test_exit_respawns() {
         // One-shot mutator: answers a single request, then exits.
-        let mut mutator = sh(r#"read id l; echo "$id ff$l""#);
+        let mut mutator = sh(r#"req; rep "ff$l""#);
         let mut input = BytesInput::new(b"a".to_vec());
         for i in 1..=3 {
             assert_eq!(run(&mut mutator, &mut input), MutationResult::Mutated);
@@ -1230,21 +1380,20 @@ mod tests {
         assert_eq!(mutator.spawn_count(), 3);
 
         // Crashes (non-zero exit) after answering once: no retry, the mutation is skipped.
-        let mut mutator = sh(r#"read id l; echo "$id ff$l"; read id l; exit 3"#);
+        let mut mutator = sh(r#"req; rep "ff$l"; req; exit 3"#);
         let mut input = BytesInput::new(b"a".to_vec());
         assert_eq!(run(&mut mutator, &mut input), MutationResult::Mutated);
         assert_eq!(run(&mut mutator, &mut input), MutationResult::Skipped);
         assert_eq!(mutator.spawn_count(), 2);
 
         // Exits without answering
-        let (result, _, spawn_count) = mutate_once("read id l; exit 3", b"a");
+        let (result, _, spawn_count) = mutate_once("req; exit 3", b"a");
         assert_eq!((result, spawn_count), (MutationResult::Skipped, 2));
     }
 
     #[test]
     fn test_stderr() {
-        let script =
-            r#"while read id l; do echo "something went wrong" >&2; echo "$id 41$l"; done"#;
+        let script = r#"while req; do echo "something went wrong" >&2; rep "41$l"; done"#;
         // stderr gets ignored (only logged)
         let mut mutator = sh(script).with_kill_on_stderr(false);
         let mut input = BytesInput::new(b"b".to_vec());
@@ -1265,22 +1414,22 @@ mod tests {
         let skipped_without_respawn = (MutationResult::Skipped, b"b".to_vec(), 1);
         // invalid hex
         assert_eq!(
-            mutate_once(r#"while read id l; do echo "$id nothex"; done"#, b"b"),
+            mutate_once(r#"while req; do rep nothex; done"#, b"b"),
             skipped_without_respawn
         );
         // only the id: no mutation
         assert_eq!(
-            mutate_once(r#"while read id l; do echo "$id"; done"#, b"b"),
+            mutate_once(r#"while req; do echo "$id"; done"#, b"b"),
             skipped_without_respawn
         );
         // an empty field: no bytes
         assert_eq!(
-            mutate_once(r#"while read id l; do echo "$id "; done"#, b"b"),
+            mutate_once(r#"while req; do rep ""; done"#, b"b"),
             skipped_without_respawn
         );
         // too many fields
         assert_eq!(
-            mutate_once(r#"while read id l; do echo "$id 41$l 42"; done"#, b"b"),
+            mutate_once(r#"while req; do rep "41$l 42"; done"#, b"b"),
             skipped_without_respawn
         );
     }
@@ -1324,7 +1473,8 @@ mod tests {
 
         /// Mutates `[("a", "x"), ("b", "y")]` once with a script that reads `id k1 v1 k2 v2`.
         fn mutate_ab(reply: &str) -> (MutationResult, Vec<(String, String)>, usize) {
-            let script = format!("while read id k1 v1 k2 v2; do {reply}; done");
+            let script =
+                format!(r#"while req; do set -- $l; k1=$1 v1=$2 k2=$3 v2=$4; {reply}; done"#);
             let mut mutator = sh(&script);
             let mut input = multipart(&[("a", "x"), ("b", "y")]);
             let result = run(&mut mutator, &mut input);
@@ -1342,7 +1492,7 @@ mod tests {
         fn test_request_format_and_mutation() {
             // Only answers if the request has the expected format.
             let (result, parts, _) = mutate_ab(
-                r#"[ "$k1 $v1 $k2 $v2" = "226122 78 226222 79" ] && echo "$id $k1 41$v1 $k2 $v2""#,
+                r#"[ "$st" = "" ] && [ "$k1 $v1 $k2 $v2" = "226122 78 226222 79" ] && rep "$k1 41$v1 $k2 $v2""#,
             );
             assert_eq!(result, MutationResult::Mutated);
             assert_eq!(parts, owned(&[("a", "Ax"), ("b", "y")]));
@@ -1350,11 +1500,11 @@ mod tests {
 
         #[test]
         fn test_reorder_remove_duplicate() {
-            let (result, parts, _) = mutate_ab(r#"echo "$id $k2 $v2 $k1 $v1 $k1 41$v1""#);
+            let (result, parts, _) = mutate_ab(r#"rep "$k2 $v2 $k1 $v1 $k1 41$v1""#);
             assert_eq!(result, MutationResult::Mutated);
             assert_eq!(parts, owned(&[("b", "y"), ("a", "x"), ("a", "Ax")]));
 
-            let (result, parts, _) = mutate_ab(r#"echo "$id $k2 $v2""#);
+            let (result, parts, _) = mutate_ab(r#"rep "$k2 $v2""#);
             assert_eq!(result, MutationResult::Mutated);
             assert_eq!(parts, owned(&[("b", "y")]));
         }
@@ -1362,7 +1512,7 @@ mod tests {
         #[test]
         fn test_empty_part() {
             // The last field is empty (trailing space)
-            let (result, parts, _) = mutate_ab(r#"echo "$id $k1 $v1 $k2 ""#);
+            let (result, parts, _) = mutate_ab(r#"rep "$k1 $v1 $k2 ""#);
             assert_eq!(result, MutationResult::Mutated);
             assert_eq!(parts, owned(&[("a", "x"), ("b", "")]));
         }
@@ -1371,11 +1521,11 @@ mod tests {
         fn test_skipped() {
             let unchanged = owned(&[("a", "x"), ("b", "y")]);
             for reply in [
-                r#"echo "$id $k1 $v1 $k2 $v2""#, // unchanged
-                r#"echo "$id""#,                 // no mutation
-                r#"echo "$id 7a7a $v1""#,        // unknown key
-                r#"echo "$id $k1""#,             // odd number of fields
-                r#"echo "$id $k1 nothex""#,      // invalid hex
+                r#"rep "$k1 $v1 $k2 $v2""#, // unchanged
+                r#"echo "$id""#,            // no mutation
+                r#"rep "7a7a $v1""#,        // unknown key
+                r#"rep "$k1""#,             // odd number of fields
+                r#"rep "$k1 nothex""#,      // invalid hex
             ] {
                 assert_eq!(
                     mutate_ab(reply),
@@ -1385,15 +1535,15 @@ mod tests {
             }
             // Wrong id: respawn
             assert_eq!(
-                mutate_ab(r#"echo "1$id $k1 41$v1 $k2 $v2""#),
+                mutate_ab(r#"printf '1%s\t%s\n' "$id" "$k1 41$v1 $k2 $v2""#),
                 (MutationResult::Skipped, unchanged, 2)
             );
         }
 
         #[test]
         fn test_no_parts() {
-            // A request for an input without parts consists of the id only.
-            let mut mutator = sh(r#"while read id rest; do [ -z "$rest" ] && echo "$id"; done"#);
+            // A request for an input without parts has an empty input section.
+            let mut mutator = sh(r#"while req; do [ -z "$l" ] && echo "$id"; done"#);
             let mut input = multipart(&[]);
             assert_eq!(run(&mut mutator, &mut input), MutationResult::Skipped);
             assert_eq!(mutator.spawn_count(), 1);
@@ -1436,7 +1586,7 @@ mod tests {
         unsafe { signal(Signal::SIGPIPE, SigHandler::SigDfl) }.unwrap();
 
         // Closes its stdin *before* answering the first request, then waits.
-        let mut mutator = sh(r#"read id l; exec 0<&-; echo "$id 41$l"; exec sleep 10"#)
+        let mut mutator = sh(r#"req; exec 0<&-; rep "41$l"; exec sleep 10"#)
             .with_timeout(Duration::from_millis(200));
         let mut input = BytesInput::new(b"b".to_vec());
         assert_eq!(run(&mut mutator, &mut input), MutationResult::Mutated);

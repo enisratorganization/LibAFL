@@ -8,29 +8,57 @@ It runs on a single core until a crash occurs and then exits.
 ## Protocol
 
 The external program is spawned once, with the switch `--mutator` appended to its arguments,
-and stdin/stdout/stderr connected to the fuzzer. Every line consists of fields separated by
-*exactly one* space; the first field is an id (`u64` as hex, without `0x`), all others are hex-encoded data:
+and stdin/stdout/stderr connected to the fuzzer. Every line is terminated by `\n` and consists of *sections*
+separated by *exactly one* tab; the fields in a section are separated by *exactly one* space (empty fields are valid).
+The id is a `u64` as hex (without `0x`), all other fields are hex-encoded data:
 
-- For each mutation, the fuzzer writes a request line to the program's stdin.
-- The program answers with exactly one reply line on stdout, starting with the id of the request.
+- For each mutation, the fuzzer writes a request line to the program's stdin: `<id>\t<state>\t<input>`.
+  All three sections always exist, the state section is empty if no state entries are sent.
+- The program answers with exactly one reply line on stdout: `<id>\t<input>`, starting with the id of the request.
   A reply with a different id makes the fuzzer respawn the program (and the mutation is `Skipped`).
-  A reply consisting of the id only means "no mutation" (`Skipped`); returning the unchanged input is `Skipped` as well.
+  A reply consisting of the id only (no tab) means "no mutation" (`Skipped`); returning the unchanged input is `Skipped` as well.
 - Anything on stderr is logged with `warn` severity. With `--kill-on-stderr`, the program is also killed
   and respawned (and the mutation is `Skipped`).
 - If the program does not answer within the timeout (or exits/crashes), it is killed and respawned (`Skipped`).
   The first request to a freshly spawned process gets an additional startup timeout (default: 5s).
 
-The data fields depend on the input type (a mutator program is built for one of them, the fuzzer doesn't tell):
+### State entries
 
-| Input                                       | Line                                               | Example                                   |
-|---------------------------------------------|----------------------------------------------------|-------------------------------------------|
-| `BytesInput` (anything `HasMutatorBytes`)   | `<id> <bytes>`                                     | `1f 616263` (`abc`)                       |
-| `MultipartInput<I, K>`                      | `<id> <key1> <value1> <key2> <value2> ...`         | `2 226122 7879 226222 ` (`"a": xy`, `"b": ""`) |
+Stateful fuzzers can send selected entries of the fuzzer's state (anything `HasNamedMetadata`, e.g., `StdState`)
+to the program. Select them by name *and type* when creating the mutator, one call per entry (nothing is sent by default):
+
+```rust
+let mutator = ExternalProcessMutator::new("python3", ["mutator.py"])?
+    .with_state_entry::<StateValueFromPut>("state_value_from_put")
+    .with_state_entry::<Round>("round");
+```
+
+The type is needed because the named metadata map can only be queried by type and name.
+The state section contains a pair of fields for each selected entry that exists in the state (missing ones, or ones
+with another type, are skipped), in the order of the calls: the entry's name, and its value as formatted by `Debug`
+(every named metadata is a `SerdeAny`, which requires `Debug`), both hex-encoded.
+The program may ignore them, and state entries are never sent back.
+
+In this fuzzer, the state has a static entry `state_value_from_put` with the value `StateValueFromPut(42)`
+(`--no-state` doesn't send it). `mutator.py` checks that it receives exactly this entry, and warns on stderr otherwise
+(`--no-check-state` switches that off).
+
+### Input fields
+
+The input fields depend on the input type (a mutator program is built for one of them, the fuzzer doesn't tell):
+
+| Input                                       | Input section                               | Example request                           |
+|---------------------------------------------|---------------------------------------------|-------------------------------------------|
+| `BytesInput` (anything `HasMutatorBytes`)   | `<bytes>`                                   | `1f\t\t616263` (`abc`, no state)          |
+| `MultipartInput<I, K>`                      | `<key1> <value1> <key2> <value2> ...`       | `2\t\t226122 7879 226222 ` (`"a": xy`, `"b": ""`) |
+
+With the state entry `round` = `Round(5)` (hex: `726f756e64` and `526f756e64283529`), the first example is sent as
+`1f\t726f756e64 526f756e64283529\t616263`.
 
 Multipart keys are the `Debug` representation of `K` (e.g., `"a"` *with quotes* for `String` keys).
 The fuzzer maps the keys of the reply back to the input's keys, so parts may be changed, reordered,
 removed, or duplicated, but every key in the reply must be one of the request's keys.
-Empty values are empty fields (note the trailing space in the example).
+Empty values are empty fields (note the trailing space in the example); an input without parts has an empty input section.
 
 ## The Python mutator
 
@@ -43,7 +71,7 @@ Empty values are empty fields (note the trailing space in the example).
 python3 mutator.py --seed 1 -n 10 "hello world"                 # print 10 mutations of the input
 printf 'abc' | python3 mutator.py -n 5 --chain                  # read input from stdin, mutate repeatedly
 python3 mutator.py --multipart --part a=hello --part b=world    # mutate a multipart input
-python3 mutator.py --mutator                                    # speak the protocol by hand (type e.g. `1 616263`)
+printf '1\t\t616263\n' | python3 mutator.py --mutator --no-check-state   # speak the protocol by hand
 ```
 
 Without `--multipart`, the script mutates bytes inputs, with it, multipart inputs.
@@ -51,7 +79,7 @@ Requests of the other kind are answered with "no mutation" and a warning on stde
 
 For testing the fuzzer's error handling, the script can inject faults (counters restart with every respawn):
 `--hang-every N [--hang-seconds S]`, `--stderr-every N`, `--crash-every N`, `--garbage-every N` (invalid hex),
-`--wrong-id-every N`.
+`--wrong-id-every N`. The state check can be switched off with `--no-check-state`.
 
 Since the switch is a plain argument, the script can also be spawned directly via its shebang (`-- ./mutator.py`).
 
@@ -75,7 +103,7 @@ cargo build --release --features multipart
 RUST_LOG=warn ./target/release/baby_fuzzer_external_mutator -- python3 mutator.py --multipart --wrong-id-every 90
 ```
 
-Options: `--timeout-ms <ms>` (default 1000), `--kill-on-stderr`, `--iters <n>` (stop after `n` iterations
+Options: `--timeout-ms <ms>` (default 1000), `--kill-on-stderr`, `--no-state` (don't send the state entry), `--iters <n>` (stop after `n` iterations
 instead of running until a crash), and `-- <program> [args...]` to use any other external mutator
 (remember `--multipart` for `mutator.py` with the `multipart` feature).
 

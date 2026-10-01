@@ -28,3 +28,4 @@ libafl = { path = "../../../libafl", features = ["tui_monitor"] }
 libafl_bolts = { path = "../../../libafl_bolts" }
 # No `release_max_level_info` here, so that the debug logs of the external mutator are available in release builds.
 log = { version = "0.4.22" }
+serde = { version = "1.0", default-features = false, features = ["derive"] }

@@ -5,13 +5,24 @@ The script has two modes, selected by the ``--mutator`` switch:
 
 * ``--mutator`` (`ExternalProcessMutator` appends it to the arguments, i.e., it runs
   ``python3 mutator.py [args...] --mutator``): serve the line-based protocol.
-  Every line consists of fields, separated by single spaces. The first field is
-  the request id (hex), the others are hex-encoded data. For every request line on
-  stdin, answer with exactly one reply line with the same id on stdout.
-  A reply consisting of the id only means "no mutation" (the fuzzer counts it as `Skipped`).
+  Every line consists of sections, separated by single tabs, and each section of fields,
+  separated by single spaces. For every request line on stdin, answer with exactly one
+  reply line with the same id on stdout.
 
-  - bytes inputs (default):   ``<id> <bytes>``
-  - multipart inputs (``--multipart``): ``<id> <key1> <value1> <key2> <value2> ...``,
+  - request: ``<id>\\t<state>\\t<input>``; the three sections always exist, and the state
+    section is empty if the fuzzer sends no state entries.
+  - reply: ``<id>\\t<input>``. A reply consisting of the id only (no tab) means
+    "no mutation" (the fuzzer counts it as `Skipped`).
+
+  The ``id`` is hex, all fields are hex-encoded data. The sections have the following fields:
+
+  - state: ``<key1> <value1> <key2> <value2> ...``, selected entries of the fuzzer's named
+    metadata: the entry's name, and its value as formatted by Rust's `Debug`. The mutator may
+    ignore them. For debugging, the script checks that it receives the entry
+    ``state_value_from_put`` = ``StateValueFromPut(42)`` of the baby fuzzer (and nothing else),
+    and warns on stderr otherwise. Use ``--no-check-state`` to switch the check off.
+  - input, bytes inputs (default): ``<bytes>``
+  - input, multipart inputs (``--multipart``): ``<key1> <value1> <key2> <value2> ...``,
     where the keys are the `Debug` representation of the Rust keys (e.g., ``"a"``
     with quotes for `String` keys). Keys are opaque: reuse, but never invent keys.
 
@@ -22,7 +33,7 @@ The script has two modes, selected by the ``--mutator`` switch:
       python3 mutator.py --seed 1 -n 10 "hello world"
       printf 'abc' | python3 mutator.py -n 5 --chain
       python3 mutator.py --multipart --part a=hello --part b=world -n 5
-      python3 mutator.py --mutator      # speak the protocol by hand (type e.g. "1 616263")
+      python3 mutator.py --mutator --no-check-state   # speak the protocol by hand, e.g.: printf '1\\t\\t616263\\n' | ...
 
 For testing the fuzzer's error handling, faults can be injected in mutator mode
 (counters are per process, so they start over after every respawn), e.g.::
@@ -147,9 +158,28 @@ def every(n: int, count: int) -> bool:
     return n > 0 and count % n == 0
 
 
+# The state that the baby fuzzer sends: key -> Debug representation of the value
+EXPECTED_STATE = {"state_value_from_put": "StateValueFromPut(42)"}
+
+
 def format_line(req_id: str, fields: list[bytes]) -> bytes:
-    """A protocol line: the id, followed by the hex-encoded fields, separated by single spaces."""
-    return " ".join([req_id, *(field.hex() for field in fields)]).encode("ascii") + b"\n"
+    """A reply line: `<id>\\t<fields>` with hex-encoded fields, separated by single spaces.
+
+    Without fields, it's the id only, which means "no mutation".
+    """
+    if not fields:
+        return req_id.encode("ascii") + b"\n"
+    return f"{req_id}\t{' '.join(field.hex() for field in fields)}\n".encode("ascii")
+
+
+def parse_fields(section: bytes, empty_is_no_field: bool) -> list[bytes]:
+    """Decodes the hex fields of a section. Split on single spaces only: empty fields are valid.
+
+    An empty section is one empty field, unless `empty_is_no_field` (no fields at all).
+    """
+    if empty_is_no_field and not section:
+        return []
+    return [bytes.fromhex(field.decode("ascii")) for field in section.split(b" ")]
 
 
 def serve(args: argparse.Namespace, rng: random.Random) -> int:
@@ -170,15 +200,26 @@ def serve(args: argparse.Namespace, rng: random.Random) -> int:
             return 0
         count += 1
 
-        # Split on single spaces only: empty fields (empty values) are valid.
-        raw_fields = line.rstrip(b"\r\n").split(b" ")
-        req_id = raw_fields[0].decode("ascii", errors="replace")
-        try:
-            fields = [bytes.fromhex(field.decode("ascii")) for field in raw_fields[1:]]
-        except ValueError:
-            warn(f"received invalid hex: {line!r}")
+        sections = line.rstrip(b"\r\n").split(b"\t")
+        req_id = sections[0].decode("ascii", errors="replace")
+        if len(sections) != 3:
+            warn(f"expected 3 sections (id, state, input), got {len(sections)}: {line!r}")
             reply(format_line(req_id, []))  # only the id == no mutation
             continue
+        try:
+            state_fields = parse_fields(sections[1], True)
+            fields = parse_fields(sections[2], args.multipart)
+        except ValueError:
+            warn(f"received invalid hex: {line!r}")
+            reply(format_line(req_id, []))
+            continue
+        if len(state_fields) % 2 != 0:
+            warn(f"expected state key/value pairs, got {len(state_fields)} fields: {line!r}")
+            reply(format_line(req_id, []))
+            continue
+        state = {k.decode(errors="replace"): v.decode(errors="replace") for k, v in zip(state_fields[0::2], state_fields[1::2])}
+        if args.check_state and state != EXPECTED_STATE:
+            warn(f"unexpected state {state!r}, expected {EXPECTED_STATE!r}")
         if (args.multipart and len(fields) % 2 != 0) or (not args.multipart and len(fields) != 1):
             kind = "key/value pairs (--multipart)" if args.multipart else "a single field (no --multipart)"
             warn(f"expected {kind}, got {len(fields)} fields: {line!r}")
@@ -194,7 +235,7 @@ def serve(args: argparse.Namespace, rng: random.Random) -> int:
         if every(args.stderr_every, count):
             warn(f"injected warning at request #{count}")
         if every(args.garbage_every, count):
-            reply(f"{req_id} this-is-not-hex\n".encode())
+            reply(f"{req_id}\tthis-is-not-hex\n".encode())
             continue
         if every(args.wrong_id_every, count):
             reply(format_line(f"{int(req_id, 16) + 1:x}", fields))
@@ -251,6 +292,9 @@ def parse_args() -> argparse.Namespace:
     serve_group = parser.add_argument_group("mutator mode (--mutator)")
     serve_group.add_argument(
         "--mutator", action="store_true", help="serve the protocol (passed by the fuzzer)"
+    )
+    serve_group.add_argument(
+        "--no-check-state", dest="check_state", action="store_false", help="don't check the state section"
     )
     serve_group.add_argument("--hang-every", type=int, default=0, metavar="N")
     serve_group.add_argument("--hang-seconds", type=float, default=10.0, metavar="S")
