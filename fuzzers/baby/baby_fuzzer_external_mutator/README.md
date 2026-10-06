@@ -28,12 +28,12 @@ The input fields depend on the input type (a mutator program is built for one of
 | Input                                       | Input section                               | Example request                           |
 |---------------------------------------------|---------------------------------------------|-------------------------------------------|
 | `BytesInput` (anything `HasMutatorBytes`)   | `<bytes>`                                   | `1f\t616263` (`abc`)                      |
-| `MultipartInput<I, K>`                      | `<key1> <value1> <key2> <value2> ...`       | `2\t226122 7879 226222 ` (`"a": xy`, `"b": ""`) |
+| `MultipartInput<I, String>`                 | `<key1> <value1> <key2> <value2> ...`       | `2\t61 7879 62 ` (`"a": xy`, `"b": ""`)   |
 
-Multipart keys are the `Debug` representation of `K` (e.g., `"a"` *with quotes* for `String` keys).
-The fuzzer maps the keys of the reply back to the input's keys, so parts may be changed, reordered,
-removed, or duplicated, but every key in the reply must be one of the request's keys.
-Empty values are empty fields (note the trailing space in the example); an input without parts has an empty input section.
+Multipart keys are hex-encoded strings (e.g., `61` for `a`); empty values are empty fields (note the trailing space in
+the example); an input without parts has an empty input section.
+The key/value pairs of the reply become the new parts: the mutator may change the values, reorder, remove, and add
+parts, and it can edit the keys or invent new ones freely.
 
 ## The Python mutator
 

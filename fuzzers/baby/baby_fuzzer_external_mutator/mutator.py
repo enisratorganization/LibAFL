@@ -17,8 +17,9 @@ The script has two modes, selected by the `--mutator` switch:
 
   - bytes inputs (default): `<bytes>`
   - multipart inputs (`--multipart`): `<key1> <value1> <key2> <value2> ...`,
-    where the keys are the `Debug` representation of the Rust keys (e.g., `"a"`
-    with quotes for `String` keys). Keys are opaque: reuse, but never invent keys.
+    where each key is a hex-encoded string and each value the hex-encoded part bytes.
+    The key/value pairs of the reply become the new parts: values may be mutated, parts
+    reordered, removed, and added, and keys may be edited or invented freely.
 
   The fuzzer does not tell which kind of input it sends: a mutator is built for one kind.
 
@@ -120,14 +121,16 @@ def mutate(data: bytes, rng: random.Random, args: argparse.Namespace) -> bytes:
     return bytes(buf)
 
 
-Part = tuple[bytes, bytes]  # (key, i.e., its Debug representation, value)
+Part = tuple[bytes, bytes]  # (key, value), both as (utf-8) bytes
+
+
+def rename_key(key: bytes, rng: random.Random) -> bytes:
+    """Appends a random letter to a key (keys are free-form strings)."""
+    return key + bytes([rng.randint(ord("A"), ord("Z"))])
 
 
 def mutate_parts(parts: list[Part], rng: random.Random, args: argparse.Namespace) -> list[Part]:
-    """Mutates a multipart input: usually the value of one part, sometimes the list of parts.
-
-    Keys are opaque: we can only reuse existing ones (the fuzzer can't create new keys).
-    """
+    """Mutates a multipart input: usually the value of one part, sometimes the list of parts or a key."""
     parts = list(parts)
     if not parts:
         return parts
@@ -141,6 +144,11 @@ def mutate_parts(parts: list[Part], rng: random.Random, args: argparse.Namespace
     elif roll < 0.2 and len(parts) > 1:
         a, b = rng.randrange(len(parts)), rng.randrange(len(parts))
         parts[a], parts[b] = parts[b], parts[a]
+    elif roll < 0.25:
+        # rename a part
+        idx = rng.randrange(len(parts))
+        key, value = parts[idx]
+        parts[idx] = (rename_key(key, rng), value)
     else:
         idx = rng.randrange(len(parts))
         key, value = parts[idx]
@@ -241,8 +249,7 @@ def show_bytes(data: bytes) -> str:
 def standalone(args: argparse.Namespace, rng: random.Random) -> int:
     """Prints mutations of a given input, to test the mutation strategy in isolation."""
     if args.multipart:
-        # Keys are formatted like Rust's `Debug` for `String` keys: with quotes
-        data = [(f'"{key}"'.encode(), value.encode()) for key, _, value in (p.partition("=") for p in args.part)]
+        data = [(key.encode(), value.encode()) for key, _, value in (p.partition("=") for p in args.part)]
     elif args.hex is not None:
         data = bytes.fromhex(args.hex)
     elif args.input is not None:

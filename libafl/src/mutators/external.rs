@@ -23,11 +23,12 @@
 //! The fields describing the input depend on the input type:
 //! - Bytes inputs ([`HasMutatorBytes`], e.g., [`crate::inputs::BytesInput`]): a single field, the bytes.
 //!   For example, the bytes input `abc` with id `1f` is sent as `1f\t616263`.
-//! - `MultipartInput<I, K>` (feature `multipart_inputs`): a pair of fields for each part,
-//!   the key (formatted with [`core::fmt::Debug`], as hex) and the part's bytes (as hex).
-//!   For example, the parts `[("a", "xy"), ("b", "")]` with id `2` are sent as `2\t226122 7879 226222 `
-//!   (`"a"`, with quotes, is the `Debug` representation of the `String` key `a`; note the empty last field).
-//!   Every key in the reply has to be one of the input's keys, but parts may be reordered, removed, or duplicated.
+//! - `MultipartInput<I, String>` (feature `multipart_inputs`): a pair of fields for each part,
+//!   the key (as hex) and the part's bytes (as hex).
+//!   For example, the parts `[("a", "xy"), ("b", "")]` with id `2` are sent as `2\t61 7879 62 `
+//!   (note the empty last field). The key/value pairs of the reply become the new parts, so the
+//!   external mutator may change the values, reorder, remove, and add parts, and it can edit the
+//!   keys or invent new ones freely.
 //!
 //! An external program is built for one of these input types, there is no negotiation.
 //!
@@ -50,8 +51,6 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-#[cfg(feature = "multipart_inputs")]
-use core::fmt::Debug;
 use core::time::Duration;
 use std::{
     ffi::{OsStr, OsString},
@@ -940,34 +939,27 @@ where
     }
 }
 
-/// Mutates a [`MultipartInput`]: the input section of the request and reply carries a pair of fields for each part,
-/// the key (formatted with [`Debug`]) and the part's bytes.
+/// Mutates a [`MultipartInput`] with `String` keys: the input section of the request and reply carries
+/// a pair of fields for each part, the key and the part's bytes, both as hex.
 ///
-/// Since keys can't be created from strings, each key in the reply has to match (the [`Debug`]
-/// string of) one of the input's keys. Hence, the external mutator can change the parts' bytes,
-/// and reorder, remove, or duplicate parts, but it can't introduce new keys.
+/// The key/value pairs of the reply become the new parts, so the external mutator can change the
+/// values, reorder, remove, and add parts, and it can edit the keys or invent new ones freely.
+/// Each returned value is written into a new default-constructed `I`.
 #[cfg(feature = "multipart_inputs")]
-impl<I, K, S> Mutator<MultipartInput<I, K>, S> for ExternalProcessMutator
+impl<I, S> Mutator<MultipartInput<I, String>, S> for ExternalProcessMutator
 where
-    I: HasMutatorBytes + ResizableMutator<u8> + Clone,
-    K: Debug + Clone,
+    I: HasMutatorBytes + ResizableMutator<u8> + Default,
     S: HasMaxSize,
 {
     fn mutate(
         &mut self,
         state: &mut S,
-        input: &mut MultipartInput<I, K>,
+        input: &mut MultipartInput<I, String>,
     ) -> Result<MutationResult, Error> {
-        let keys: Vec<String> = input
-            .parts()
-            .iter()
-            .map(|(key, _)| format!("{key:?}"))
-            .collect();
         let fields: Vec<&[u8]> = input
             .parts()
             .iter()
-            .zip(&keys)
-            .flat_map(|((_, part), key)| [key.as_bytes(), part.mutator_bytes()])
+            .flat_map(|(key, part)| [key.as_bytes(), part.mutator_bytes()])
             .collect();
         let Some(reply) = self.exchange(&fields)? else {
             return Ok(MutationResult::Skipped);
@@ -992,9 +984,9 @@ where
         let mut parts = Vec::with_capacity(reply.len() / 2);
         for pair in reply.chunks_exact(2) {
             let (key, bytes) = (&pair[0], &pair[1]);
-            let Some(idx) = keys.iter().position(|k| k.as_bytes() == key.as_slice()) else {
+            let Ok(key) = core::str::from_utf8(key) else {
                 log::warn!(
-                    "{}: external mutator returned unknown key {:?}, skipping",
+                    "{}: external mutator returned a key that is not valid utf-8 ({:?}), skipping",
                     self.name,
                     String::from_utf8_lossy(key)
                 );
@@ -1003,10 +995,9 @@ where
             if self.exceeds_max_size(bytes.len(), max_size) {
                 return Ok(MutationResult::Skipped);
             }
-            let (key, template) = &input.parts()[idx];
-            let mut part = template.clone();
+            let mut part = I::default();
             set_bytes(&mut part, bytes);
-            parts.push((key.clone(), part));
+            parts.push((key.to_string(), part));
         }
 
         log::debug!(
@@ -1083,8 +1074,8 @@ mod tests {
     fn test_encode_and_parse() {
         assert_eq!(encode_request(0x1f, &[b"abc"]), b"1f\t616263\n");
         assert_eq!(
-            encode_request(2, &[b"\"a\"", b"xy", b"\"b\"", b""]),
-            b"2\t226122 7879 226222 \n"
+            encode_request(2, &[b"a", b"xy", b"b", b""]),
+            b"2\t61 7879 62 \n"
         );
         assert_eq!(encode_request(5, &[]), b"5\t\n");
         assert_eq!(encode_request(5, &[b"", b""]), b"5\t \n");
@@ -1302,7 +1293,7 @@ mod tests {
     }
 
     /// Tests for [`crate::inputs::MultipartInput`], with `String` keys.
-    /// The `Debug` strings of the keys `a` and `b` are `"a"` (hex `226122`) and `"b"` (hex `226222`).
+    /// The keys are sent as plain hex-encoded strings, i.e., `a` is hex `61` and `b` is `62`.
     #[cfg(feature = "multipart_inputs")]
     mod multipart {
         use alloc::{
@@ -1358,15 +1349,14 @@ mod tests {
         #[test]
         fn test_request_format_and_mutation() {
             // Only answers if the request has the expected format.
-            let (result, parts, _) = mutate_ab(
-                r#"[ "$k1 $v1 $k2 $v2" = "226122 78 226222 79" ] && rep "$k1 41$v1 $k2 $v2""#,
-            );
+            let (result, parts, _) =
+                mutate_ab(r#"[ "$k1 $v1 $k2 $v2" = "61 78 62 79" ] && rep "$k1 41$v1 $k2 $v2""#);
             assert_eq!(result, MutationResult::Mutated);
             assert_eq!(parts, owned(&[("a", "Ax"), ("b", "y")]));
         }
 
         #[test]
-        fn test_reorder_remove_duplicate() {
+        fn test_reorder_remove_add_rename() {
             let (result, parts, _) = mutate_ab(r#"rep "$k2 $v2 $k1 $v1 $k1 41$v1""#);
             assert_eq!(result, MutationResult::Mutated);
             assert_eq!(parts, owned(&[("b", "y"), ("a", "x"), ("a", "Ax")]));
@@ -1374,6 +1364,16 @@ mod tests {
             let (result, parts, _) = mutate_ab(r#"rep "$k2 $v2""#);
             assert_eq!(result, MutationResult::Mutated);
             assert_eq!(parts, owned(&[("b", "y")]));
+
+            // Add a part with a new key
+            let (result, parts, _) = mutate_ab(r#"rep "$k1 $v1 $k2 $v2 63 7a7a""#);
+            assert_eq!(result, MutationResult::Mutated);
+            assert_eq!(parts, owned(&[("a", "x"), ("b", "y"), ("c", "zz")]));
+
+            // Rename a key
+            let (result, parts, _) = mutate_ab(r#"rep "$k1 $v1 63 $v2""#);
+            assert_eq!(result, MutationResult::Mutated);
+            assert_eq!(parts, owned(&[("a", "x"), ("c", "y")]));
         }
 
         #[test]
@@ -1390,7 +1390,7 @@ mod tests {
             for reply in [
                 r#"rep "$k1 $v1 $k2 $v2""#, // unchanged
                 r#"echo "$id""#,            // no mutation
-                r#"rep "7a7a $v1""#,        // unknown key
+                r#"rep "ff $v1 $k2 $v2""#,  // key is not valid utf-8
                 r#"rep "$k1""#,             // odd number of fields
                 r#"rep "$k1 nothex""#,      // invalid hex
             ] {
