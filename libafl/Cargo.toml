@@ -208,6 +208,9 @@ nautilus_py = ["nautilus", "dep:pyo3"]
 ## Lua Mutator support (mutators implemented in Lua)
 lua_mutator = ["mlua"]
 
+## Python Mutator support (mutators implemented in Python, run in an embedded CPython interpreter)
+python_mutator = ["std", "dep:pyo3"]
+
 ## Use the best SIMD implementation by our benchmark
 simd = ["libafl_bolts/simd"]
 

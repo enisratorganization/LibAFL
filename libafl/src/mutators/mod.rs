@@ -31,6 +31,11 @@ pub use tuneable::*;
 #[cfg(feature = "lua_mutator")]
 pub mod lua;
 
+#[cfg(feature = "python_mutator")]
+pub mod python;
+#[cfg(feature = "python_mutator")]
+pub use python::PyMutator;
+
 #[cfg(all(feature = "std", unix))]
 pub mod external;
 #[cfg(all(feature = "std", unix))]
