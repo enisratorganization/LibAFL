@@ -1,6 +1,9 @@
 //! A baby fuzzer that uses the [`PyMutator`]: every mutation runs a Python function
 //! `mutate(b: bytes) -> bytes` in an embedded CPython interpreter (via PyO3).
 //!
+//! With the feature `multipart`, the fuzzer uses a `MultipartInput` (with a `header` and a `payload` part)
+//! instead of a `BytesInput`, and the Python function `mutate_multi(parts)` is used instead.
+//!
 //! By default the module `mutator` (i.e., `mutator.py`) from this folder is imported,
 //! but any module on `sys.path` (or in any directory) can be used.
 //!
@@ -32,6 +35,8 @@ use libafl::{
     stages::mutational::StdMutationalStage,
     state::StdState,
 };
+#[cfg(feature = "multipart")]
+use libafl::{generators::Generator, inputs::MultipartInput, state::HasRand, Error};
 use libafl_bolts::{current_nanos, nonzero, rands::StdRand, tuples::tuple_list, AsSlice};
 
 /// Coverage map with explicit assignments due to the lack of instrumentation
@@ -43,6 +48,50 @@ static mut SIGNALS_PTR: *mut u8 = unsafe { SIGNALS.as_mut_ptr() };
 /// Assign a signal to the signals map
 fn signals_set(idx: usize) {
     unsafe { *SIGNALS_PTR.add(idx) = 1 };
+}
+
+/// The input type: plain bytes
+#[cfg(not(feature = "multipart"))]
+type FuzzInput = BytesInput;
+
+/// The bytes the harness looks at
+#[cfg(not(feature = "multipart"))]
+fn harness_bytes(input: &FuzzInput) -> Vec<u8> {
+    input.target_bytes().as_slice().to_vec()
+}
+
+/// The input type: multiple parts, identified by `String` keys
+/// (the `PyMutator` passes them to Python without the `"` of their `Debug` representation)
+#[cfg(feature = "multipart")]
+type FuzzInput = MultipartInput<BytesInput, String>;
+
+/// The key of the parts the harness looks at
+#[cfg(feature = "multipart")]
+const PAYLOAD_KEY: &str = "payload";
+
+/// The bytes the harness looks at: all `payload` parts, concatenated (other parts are ignored)
+#[cfg(feature = "multipart")]
+fn harness_bytes(input: &FuzzInput) -> Vec<u8> {
+    input
+        .parts()
+        .iter()
+        .filter(|(key, _)| key == PAYLOAD_KEY)
+        .flat_map(|(_, part)| part.target_bytes().as_slice().to_vec())
+        .collect()
+}
+
+/// Generates multipart inputs with a random `header` and `payload` part
+#[cfg(feature = "multipart")]
+struct MultipartGenerator(RandPrintablesGenerator);
+
+#[cfg(feature = "multipart")]
+impl<S: HasRand> Generator<FuzzInput, S> for MultipartGenerator {
+    fn generate(&mut self, state: &mut S) -> Result<FuzzInput, Error> {
+        Ok(MultipartInput::new(vec![
+            ("header".into(), self.0.generate(state)?),
+            (PAYLOAD_KEY.into(), self.0.generate(state)?),
+        ]))
+    }
 }
 
 /// Command line options
@@ -103,9 +152,8 @@ pub fn main() {
     println!("Python mutator setup: {options:?}");
 
     // The closure that we want to fuzz
-    let mut harness = |input: &BytesInput| {
-        let target = input.target_bytes();
-        let buf = target.as_slice();
+    let mut harness = |input: &FuzzInput| {
+        let buf = harness_bytes(input);
         signals_set(0);
         if !buf.is_empty() && buf[0] == b'a' {
             signals_set(1);
@@ -176,8 +224,11 @@ pub fn main() {
     )
     .expect("Failed to create the Executor");
 
-    // Generator of printable bytearrays of max size 32
+    // Generator of printable bytearrays of max size 32 (for each part of multipart inputs)
+    #[cfg(not(feature = "multipart"))]
     let mut generator = RandPrintablesGenerator::new(nonzero!(32));
+    #[cfg(feature = "multipart")]
+    let mut generator = MultipartGenerator(RandPrintablesGenerator::new(nonzero!(32)));
 
     // Generate 8 initial inputs
     state

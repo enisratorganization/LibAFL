@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Python mutator module for LibAFL's `PyMutator`.
 
-The fuzzer imports this module (`PyMutator::from_module_in`) and calls `mutate` for every mutation.
+The fuzzer imports this module (`PyMutator::from_module_in`) and calls, for every mutation,
+`mutate` (bytes inputs) or `mutate_multi` (multipart inputs, feature `multipart` of the fuzzer).
 The embedded interpreter seeds Python's global `random` module from the fuzzer's state RNG,
 so each fuzzer run gets its own (reproducible) mutation stream.
 
@@ -10,10 +11,15 @@ so each fuzzer run gets its own (reproducible) mutation stream.
 >>> mutate(b"hello world")  # doctest: +SKIP
 b'he\x00lo worlD'
 
+`mutate_multi(parts: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]` gets the key (`str`) and the value of each part. It usually mutates the value
+of one part, sometimes the list of parts. Keys are opaque: it can reuse the existing keys
+(duplicate, reorder, remove parts), but the fuzzer skips results with new keys.
+
 Stand-alone mode, to test and debug the mutation strategy in isolation::
 
     python3 mutator.py --seed 1 -n 10 "hello world"
     printf 'abc' | python3 mutator.py -n 5 --chain
+    python3 mutator.py --part a=hello --part b=world -n 5     # mutate_multi
 """
 
 import argparse
@@ -27,6 +33,8 @@ INTERESTING = [0x00, 0x01, 0x7F, 0x80, 0xFF, ord("a"), ord("b"), ord("c"), ord("
 MAX_LEN = 4096
 # Max number of operations applied per mutation
 MAX_OPS = 8
+# Max number of parts of a multipart input
+MAX_PARTS = 8
 
 
 def random_byte(rng: random.Random) -> int:
@@ -99,10 +107,35 @@ def mutate(b: bytes) -> bytes:
     return bytes(buf)
 
 
+def mutate_multi(parts: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
+    """The function called by the `PyMutator` for multipart inputs: usually mutates the value of
+    one part, sometimes duplicates (with a mutated value), removes, or swaps parts."""
+    parts = list(parts)
+    if not parts:
+        return parts
+    roll = random.random()
+    if roll < 0.1 and len(parts) < MAX_PARTS:
+        key, value = random.choice(parts)
+        parts.insert(random.randint(0, len(parts)), (key, mutate(value)))
+    elif roll < 0.15 and len(parts) > 1:
+        del parts[random.randrange(len(parts))]
+    elif roll < 0.2 and len(parts) > 1:
+        a, b = random.randrange(len(parts)), random.randrange(len(parts))
+        parts[a], parts[b] = parts[b], parts[a]
+    else:
+        idx = random.randrange(len(parts))
+        key, value = parts[idx]
+        parts[idx] = (key, mutate(value))
+    return parts
+
+
 def main() -> None:
     """Stand-alone mode: print mutations of an input, for testing the strategy in isolation."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("input", nargs="?", help="input (default: read stdin)")
+    parser.add_argument(
+        "--part", action="append", metavar="KEY=VALUE", help="mutate_multi: a part (repeatable, instead of the input)"
+    )
     parser.add_argument("-n", type=int, default=5, help="number of mutations to print")
     parser.add_argument("--seed", type=int, help="seed the global random module")
     parser.add_argument(
@@ -112,6 +145,14 @@ def main() -> None:
 
     if args.seed is not None:
         random.seed(args.seed)
+    if args.part:
+        parts = [(key, value.encode()) for key, _, value in (p.partition("=") for p in args.part)]
+        for _ in range(args.n):
+            result = mutate_multi(parts)
+            print(result)
+            if args.chain:
+                parts = result
+        return
     data = (
         sys.stdin.buffer.read() if args.input is None else args.input.encode()
     )

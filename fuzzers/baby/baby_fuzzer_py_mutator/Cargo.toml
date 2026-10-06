@@ -9,6 +9,7 @@ edition = "2021"
 
 [features]
 tui = []
+multipart = ["libafl/multipart_inputs"]
 
 [profile.dev]
 panic = "abort"
