@@ -5,12 +5,8 @@
 //! Usage:
 //!
 //! ```text
-//! baby_fuzzer_external_mutator [--timeout-ms <ms>] [--kill-on-stderr] [--no-state] [--iters <n>] [-- <program> [args...]]
+//! baby_fuzzer_external_mutator [--timeout-ms <ms>] [--kill-on-stderr] [--iters <n>] [-- <program> [args...]]
 //! ```
-//!
-//! The fuzzer's state contains a (static) named metadata entry `state_value_from_put`, which stands for
-//! the state of a stateful fuzzer. The mutator is configured to send it to the external program with
-//! every request (unless `--no-state` is given), where the default `mutator.py` checks it.
 //!
 //! Use `RUST_LOG=warn` to see the external mutator's stderr and respawns,
 //! `RUST_LOG=debug` for a detailed trace of every mutation roundtrip.
@@ -36,29 +32,16 @@ use libafl::{
     schedulers::QueueScheduler,
     stages::mutational::{MutationalStage, StdMutationalStage},
     state::StdState,
-    HasNamedMetadata,
 };
 #[cfg(feature = "multipart")]
 use libafl::{generators::Generator, inputs::MultipartInput, state::HasRand, Error};
-use libafl_bolts::{
-    current_nanos, impl_serdeany, nonzero, rands::StdRand, tuples::tuple_list, AsSlice,
-};
-use serde::{Deserialize, Serialize};
+use libafl_bolts::{current_nanos, nonzero, rands::StdRand, tuples::tuple_list, AsSlice};
 
 /// Coverage map with explicit assignments due to the lack of instrumentation
 static mut SIGNALS: [u8; 16] = [0; 16];
 // TODO: This will break soon, fix me! See https://github.com/AFLplusplus/LibAFL/issues/2786
 #[allow(static_mut_refs)] // only a problem in nightly
 static mut SIGNALS_PTR: *mut u8 = unsafe { SIGNALS.as_mut_ptr() };
-
-/// The name of the state's named metadata entry that is sent to the external mutator
-const STATE_KEY: &str = "state_value_from_put";
-
-/// The (static) example state of the program under test (PUT). Its `Debug` representation,
-/// `StateValueFromPut(42)`, is what the external mutator receives (and what `mutator.py` expects).
-#[derive(Debug, Serialize, Deserialize)]
-struct StateValueFromPut(u32);
-impl_serdeany!(StateValueFromPut);
 
 /// Assign a signal to the signals map
 fn signals_set(idx: usize) {
@@ -124,8 +107,6 @@ struct Options {
     timeout: Duration,
     /// Kill and respawn the external mutator whenever it writes to stderr
     kill_on_stderr: bool,
-    /// Don't send the state entry to the external mutator
-    no_state: bool,
     /// Stop after this many fuzzing iterations (run forever / until a crash if `None`)
     iters: Option<u64>,
     /// The external mutator program
@@ -136,7 +117,7 @@ struct Options {
 
 fn usage(prog: &str) -> ! {
     eprintln!(
-        "Usage: {prog} [--timeout-ms <ms>] [--kill-on-stderr] [--no-state] [--iters <n>] [-- <program> [args...]]\n\
+        "Usage: {prog} [--timeout-ms <ms>] [--kill-on-stderr] [--iters <n>] [-- <program> [args...]]\n\
          \n\
          Without `-- <program>`, `python3 {}` is used as external mutator.",
         default_mutator_args().join(" ")
@@ -152,7 +133,6 @@ fn parse_args() -> Options {
     let mut options = Options {
         timeout: Duration::from_millis(1000),
         kill_on_stderr: false,
-        no_state: false,
         iters: None,
         program: "python3".into(),
         args: default_mutator_args(),
@@ -168,7 +148,6 @@ fn parse_args() -> Options {
         match arg.as_str() {
             "--timeout-ms" => options.timeout = Duration::from_millis(parse_num(argv.next())),
             "--kill-on-stderr" => options.kill_on_stderr = true,
-            "--no-state" => options.no_state = true,
             "--iters" => options.iters = Some(parse_num(argv.next())),
             "--" => {
                 options.program = argv.next().unwrap_or_else(|| usage(&prog));
@@ -230,9 +209,6 @@ pub fn main() {
     )
     .unwrap();
 
-    // The (static) state of the "program under test", which the external mutator gets to see
-    state.add_named_metadata(STATE_KEY, StateValueFromPut(42));
-
     // The Monitor trait define how the fuzzer stats are displayed to the user
     #[cfg(not(feature = "tui"))]
     let mon = SimpleMonitor::new(|s| println!("{s}"));
@@ -274,14 +250,10 @@ pub fn main() {
         .expect("Failed to generate the initial corpus");
 
     // Setup a mutational stage that delegates all mutations to the external program
-    let mut mutator = ExternalProcessMutator::new(&options.program, &options.args)
+    let mutator = ExternalProcessMutator::new(&options.program, &options.args)
         .expect("Failed to spawn the external mutator")
         .with_timeout(options.timeout)
         .with_kill_on_stderr(options.kill_on_stderr);
-    if !options.no_state {
-        // Send this named metadata entry (name and type) to the program with every request
-        mutator = mutator.with_state_entry::<StateValueFromPut>(STATE_KEY);
-    }
     let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 
     if let Some(iters) = options.iters {

@@ -7,10 +7,8 @@
 //! Inside a section, *fields* are separated by *exactly one* space (`' '`). Empty fields are valid.
 //!
 //! 1. For each call to [`Mutator::mutate`], the fuzzer writes a request line to the program's `stdin`.
-//!    It *always* has three sections, `<id>\t<state>\t<input>`:
+//!    It *always* has two sections, `<id>\t<input>`:
 //!    - the request id: a `u64` in (lowercase) hex, without `0x` prefix,
-//!    - the state entries (see below), which is empty if no
-//!      [state entries](ExternalProcessMutator::with_state_entry) are configured,
 //!    - the fields describing the input, encoded as hex (see below).
 //! 2. The program answers with exactly one reply line on its `stdout`, `<id>\t<input>`:
 //!    - the id must be the id of the request, otherwise the program is respawned,
@@ -20,28 +18,14 @@
 //!    If [`ExternalProcessMutator::kill_on_stderr`] is set, the program is also killed and respawned
 //!    (and the mutation is [`MutationResult::Skipped`]).
 //!
-//! # State entries
-//!
-//! Stateful fuzzers can pass selected entries of the fuzzer's state to the program, to be able to
-//! base the mutation on them. This works for every [`HasNamedMetadata`] state.
-//! Select the entries by their name *and type* with [`ExternalProcessMutator::with_state_entry`],
-//! once for each entry (nothing is sent by default).
-//! The state section consists of a pair of fields for each selected entry that currently exists
-//! (entries that are not in the state are skipped), in the order of the configuration:
-//! the entry's name (as hex), and its value, formatted with [`core::fmt::Debug`] (as hex).
-//! The program is free to ignore them. State entries are never sent back.
-//!
-//! For example, with the state entry `round` (a metadata `Round(5)`, `Debug`: `Round(5)`),
-//! the bytes input `abc` with id `1f` is sent as `1f\t726f756e64 526f756e64283529\t616263`,
-//! and without any state key as `1f\t\t616263`.
-//!
 //! # Input fields
 //!
 //! The fields describing the input depend on the input type:
 //! - Bytes inputs ([`HasMutatorBytes`], e.g., [`crate::inputs::BytesInput`]): a single field, the bytes.
+//!   For example, the bytes input `abc` with id `1f` is sent as `1f\t616263`.
 //! - `MultipartInput<I, K>` (feature `multipart_inputs`): a pair of fields for each part,
 //!   the key (formatted with [`core::fmt::Debug`], as hex) and the part's bytes (as hex).
-//!   For example, the parts `[("a", "xy"), ("b", "")]` with id `2` are sent as `2\t\t226122 7879 226222 `
+//!   For example, the parts `[("a", "xy"), ("b", "")]` with id `2` are sent as `2\t226122 7879 226222 `
 //!   (`"a"`, with quotes, is the `Debug` representation of the `String` key `a`; note the empty last field).
 //!   Every key in the reply has to be one of the input's keys, but parts may be reordered, removed, or duplicated.
 //!
@@ -79,10 +63,7 @@ use std::{
     time::Instant,
 };
 
-use libafl_bolts::{
-    Error, Named,
-    serdeany::{NamedSerdeAnyMap, SerdeAny},
-};
+use libafl_bolts::{Error, Named};
 use nix::{
     errno::Errno,
     poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -93,7 +74,6 @@ use super::{MutationResult, Mutator};
 #[cfg(feature = "multipart_inputs")]
 use crate::inputs::MultipartInput;
 use crate::{
-    HasNamedMetadata,
     corpus::CorpusId,
     inputs::{HasMutatorBytes, ResizableMutator},
     state::HasMaxSize,
@@ -150,13 +130,6 @@ struct Pending {
     kill_for_stderr: bool,
     /// The process exited or closed its stdout
     exited: bool,
-}
-
-/// Gets the `Debug` representation of the named metadata entry of a fixed type, if it exists
-type StateGetter = fn(&NamedSerdeAnyMap, &str) -> Option<String>;
-
-fn get_state_entry<T: SerdeAny>(map: &NamedSerdeAnyMap, name: &str) -> Option<String> {
-    map.get::<T>(name).map(|value| format!("{value:?}"))
 }
 
 /// A running instance of the external mutator process, including its I/O threads.
@@ -225,15 +198,12 @@ impl Drop for ExternalProcess {
     }
 }
 
-/// Encodes a request line: `<id>\t<state>\t<input>`, with the hex-encoded `state` and `input` fields
+/// Encodes a request line: `<id>\t<input>`, with the hex-encoded `input` fields
 /// (separated by single spaces).
-fn encode_request(id: u64, state: &[&[u8]], input: &[&[u8]]) -> Vec<u8> {
-    let encode_section =
-        |fields: &[&[u8]]| fields.iter().map(hex::encode).collect::<Vec<_>>().join(" ");
+fn encode_request(id: u64, input: &[&[u8]]) -> Vec<u8> {
     format!(
-        "{id:x}\t{}\t{}\n",
-        encode_section(state),
-        encode_section(input)
+        "{id:x}\t{}\n",
+        input.iter().map(hex::encode).collect::<Vec<_>>().join(" ")
     )
     .into_bytes()
 }
@@ -437,11 +407,7 @@ fn spawn_stdin_writer(
 /// // Runs `python3 ./mutator.py --mutator`
 /// let mutator = ExternalProcessMutator::new("python3", ["./mutator.py"])?
 ///     .with_timeout(Duration::from_millis(500))
-///     .with_kill_on_stderr(false)
-///     // Also send the state's named metadata entries "round" (a `Round`) and "phase" (a `Phase`)
-///     // with every request
-///     .with_state_entry::<Round>("round")
-///     .with_state_entry::<Phase>("phase");
+///     .with_kill_on_stderr(false);
 /// let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 /// ```
 #[derive(Debug)]
@@ -452,8 +418,6 @@ pub struct ExternalProcessMutator {
     timeout: Duration,
     startup_timeout: Duration,
     kill_on_stderr: bool,
-    /// The state's named metadata entries that are sent with every request: names and (typed) getters
-    state_entries: Vec<(String, StateGetter)>,
     process: Option<ExternalProcess>,
     spawn_count: usize,
     /// The id of the next request
@@ -484,7 +448,6 @@ impl ExternalProcessMutator {
             timeout: DEFAULT_EXTERNAL_MUTATOR_TIMEOUT,
             startup_timeout: DEFAULT_EXTERNAL_MUTATOR_STARTUP_TIMEOUT,
             kill_on_stderr: false,
-            state_entries: Vec::new(),
             process: None,
             spawn_count: 0,
             next_id: 0,
@@ -517,19 +480,6 @@ impl ExternalProcessMutator {
         self
     }
 
-    /// Sends the entry `name` of the state's named metadata ([`HasNamedMetadata`]), of type `T`,
-    /// to the external process with every request. Call it once for each entry to send.
-    /// By default, no state entries are sent.
-    ///
-    /// The entry is sent as its name and its [`core::fmt::Debug`] representation,
-    /// see the [module-level documentation](self). An entry that doesn't exist in the state
-    /// (with this name and type) is skipped.
-    #[must_use]
-    pub fn with_state_entry<T: SerdeAny>(mut self, name: impl Into<String>) -> Self {
-        self.state_entries.push((name.into(), get_state_entry::<T>));
-        self
-    }
-
     /// Sets a custom name for this mutator.
     #[must_use]
     pub fn with_name<N>(mut self, name: N) -> Self
@@ -538,11 +488,6 @@ impl ExternalProcessMutator {
     {
         self.name = name.into();
         self
-    }
-
-    /// The names of the state's named metadata entries that are sent with every request
-    pub fn state_keys(&self) -> impl Iterator<Item = &str> {
-        self.state_entries.iter().map(|(name, _)| name.as_str())
     }
 
     /// The timeout for a single mutation roundtrip
@@ -813,15 +758,11 @@ impl ExternalProcessMutator {
 
     /// Performs one request/reply exchange with the external process, handling all errors.
     ///
-    /// The selected entries of the `state` and the input `fields` are sent hex-encoded (after a fresh
-    /// request id), and the input fields of the reply are returned decoded. Returns `None` if the mutation
-    /// has to be skipped (timeout, crash, stderr output with [`Self::kill_on_stderr`], wrong id,
-    /// invalid hex, or an unchanged reply).
-    fn exchange<S: HasNamedMetadata>(
-        &mut self,
-        state: &S,
-        fields: &[&[u8]],
-    ) -> Result<Option<Vec<Vec<u8>>>, Error> {
+    /// The input `fields` are sent hex-encoded (after a fresh request id), and the input fields of
+    /// the reply are returned decoded. Returns `None` if the mutation has to be skipped (timeout,
+    /// crash, stderr output with [`Self::kill_on_stderr`], wrong id, invalid hex, or an unchanged
+    /// reply).
+    fn exchange(&mut self, fields: &[&[u8]]) -> Result<Option<Vec<Vec<u8>>>, Error> {
         // Make sure a healthy process is running, and get rid of leftovers from previous rounds.
         if self.process.is_none() {
             self.spawn()?;
@@ -835,13 +776,10 @@ impl ExternalProcessMutator {
 
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        let state_fields = self.state_fields(state);
-        let state_fields: Vec<&[u8]> = state_fields.iter().map(Vec::as_slice).collect();
-        let request = encode_request(id, &state_fields, fields);
+        let request = encode_request(id, fields);
         log::debug!(
-            "{}: sending request {id:x} with {} state field(s) and {} input field(s), {} bytes, to external mutator (pid {:?})",
+            "{}: sending request {id:x} with {} input field(s), {} bytes, to external mutator (pid {:?})",
             self.name,
-            state_fields.len(),
             fields.len(),
             request.len(),
             self.pid()
@@ -922,20 +860,6 @@ impl ExternalProcessMutator {
         }
     }
 
-    /// The names and `Debug` representations of the selected named metadata entries of the `state`
-    fn state_fields<S: HasNamedMetadata>(&self, state: &S) -> Vec<Vec<u8>> {
-        let mut fields = Vec::new();
-        for (name, get) in &self.state_entries {
-            if let Some(value) = get(state.named_metadata_map(), name) {
-                fields.push(name.clone().into_bytes());
-                fields.push(value.into_bytes());
-            } else {
-                log::debug!("{}: state has no metadata named {name:?}", self.name);
-            }
-        }
-        fields
-    }
-
     /// Checks if the mutated bytes of a (part of an) input exceed the max size.
     fn exceeds_max_size(&self, len: usize, max_size: usize) -> bool {
         if len > max_size {
@@ -972,10 +896,10 @@ impl Named for ExternalProcessMutator {
 impl<I, S> Mutator<I, S> for ExternalProcessMutator
 where
     I: HasMutatorBytes + ResizableMutator<u8>,
-    S: HasMaxSize + HasNamedMetadata,
+    S: HasMaxSize,
 {
     fn mutate(&mut self, state: &mut S, input: &mut I) -> Result<MutationResult, Error> {
-        let Some(reply) = self.exchange(state, &[input.mutator_bytes()])? else {
+        let Some(reply) = self.exchange(&[input.mutator_bytes()])? else {
             return Ok(MutationResult::Skipped);
         };
         let mutated = match reply.as_slice() {
@@ -1027,7 +951,7 @@ impl<I, K, S> Mutator<MultipartInput<I, K>, S> for ExternalProcessMutator
 where
     I: HasMutatorBytes + ResizableMutator<u8> + Clone,
     K: Debug + Clone,
-    S: HasMaxSize + HasNamedMetadata,
+    S: HasMaxSize,
 {
     fn mutate(
         &mut self,
@@ -1045,7 +969,7 @@ where
             .zip(&keys)
             .flat_map(|((_, part), key)| [key.as_bytes(), part.mutator_bytes()])
             .collect();
-        let Some(reply) = self.exchange(state, &fields)? else {
+        let Some(reply) = self.exchange(&fields)? else {
             return Ok(MutationResult::Skipped);
         };
         if reply.is_empty() {
@@ -1107,25 +1031,22 @@ mod tests {
     use core::time::Duration;
     use std::time::Instant;
 
-    use serde::{Deserialize, Serialize};
-
     use super::{ExternalProcessMutator, decode_fields, encode_request, parse_id, split_id};
     use crate::{
-        HasNamedMetadata,
         inputs::{BytesInput, HasMutatorBytes},
         mutators::{MutationResult, Mutator},
         state::NopState,
     };
 
     /// Shell functions available to the scripts of [`sh`]:
-    /// - `req` reads a request line into `$id`, `$st` (state section), and `$l` (input section),
+    /// - `req` reads a request line into `$id` (the id) and `$l` (the input section),
     ///   (`read` can't be used, since it collapses the tabs),
     /// - `rep <input>` answers with `$id` and the given input section.
     const PRELUDE: &str = r#"
         T=$(printf '\t')
         req() {
             IFS= read -r line || return
-            id=${line%%"$T"*}; rest=${line#*"$T"}; st=${rest%%"$T"*}; l=${rest#*"$T"}
+            id=${line%%"$T"*}; l=${line#*"$T"}
         }
         rep() { printf '%s\t%s\n' "$id" "$1"; }
     "#;
@@ -1160,21 +1081,14 @@ mod tests {
 
     #[test]
     fn test_encode_and_parse() {
-        assert_eq!(encode_request(0x1f, &[], &[b"abc"]), b"1f\t\t616263\n");
+        assert_eq!(encode_request(0x1f, &[b"abc"]), b"1f\t616263\n");
         assert_eq!(
-            encode_request(0x1f, &[b"round", b"5"], &[b"abc"]),
-            b"1f\t726f756e64 35\t616263\n"
+            encode_request(2, &[b"\"a\"", b"xy", b"\"b\"", b""]),
+            b"2\t226122 7879 226222 \n"
         );
-        assert_eq!(
-            encode_request(2, &[], &[b"\"a\"", b"xy", b"\"b\"", b""]),
-            b"2\t\t226122 7879 226222 \n"
-        );
-        assert_eq!(encode_request(5, &[], &[]), b"5\t\t\n");
-        assert_eq!(encode_request(5, &[b"", b""], &[]), b"5\t \t\n");
-        assert_eq!(
-            encode_request(u64::MAX, &[], &[b""]),
-            b"ffffffffffffffff\t\t\n"
-        );
+        assert_eq!(encode_request(5, &[]), b"5\t\n");
+        assert_eq!(encode_request(5, &[b"", b""]), b"5\t \n");
+        assert_eq!(encode_request(u64::MAX, &[b""]), b"ffffffffffffffff\t\n");
 
         assert_eq!(split_id(b"1f\t6162"), (&b"1f"[..], Some(&b"6162"[..])));
         assert_eq!(split_id(b"1f\t"), (&b"1f"[..], Some(&b""[..])));
@@ -1198,53 +1112,6 @@ mod tests {
         );
         assert!(decode_fields(Some(b"6")).is_err());
         assert!(decode_fields(Some(b"zz")).is_err());
-    }
-
-    /// A metadata for the state tests, `Debug`: `TestMeta(5)`
-    #[derive(Debug, Serialize, Deserialize)]
-    struct TestMeta(u32);
-    libafl_bolts::impl_serdeany!(TestMeta);
-
-    /// Another metadata type, to test that the type matters
-    #[derive(Debug, Serialize, Deserialize)]
-    struct OtherMeta;
-    libafl_bolts::impl_serdeany!(OtherMeta);
-
-    #[test]
-    fn test_state_entries() {
-        // `named`/`TestMeta(5)` and `other`/`TestMeta(7)` as hex, in the order of the keys. "missing" doesn't exist: skipped.
-        let expected = "6e616d6564 546573744d657461283529 6f74686572 546573744d657461283729";
-        let mut state = NopState::<BytesInput>::new();
-        state.add_named_metadata("named", TestMeta(5));
-        state.add_named_metadata("other", TestMeta(7));
-
-        // The script only answers if the state section has the expected content.
-        let script = format!(r#"while req; do [ "$st" = "{expected}" ] && rep "41$l"; done"#);
-        let mut mutator = sh(&script)
-            .with_state_entry::<TestMeta>("named")
-            .with_state_entry::<TestMeta>("missing")
-            .with_state_entry::<TestMeta>("other")
-            // The entry exists, but with another type
-            .with_state_entry::<OtherMeta>("named");
-        assert_eq!(
-            mutator.state_keys().collect::<Vec<_>>(),
-            ["named", "missing", "other", "named"]
-        );
-        let mut input = BytesInput::new(b"b".to_vec());
-        assert_eq!(
-            mutator.mutate(&mut state, &mut input).unwrap(),
-            MutationResult::Mutated
-        );
-        assert_eq!(input.mutator_bytes(), b"Ab");
-        assert_eq!(mutator.spawn_count(), 1);
-
-        // Without selected keys, the state section is empty, even if the state has entries.
-        let mut mutator = sh(r#"while req; do [ -z "$st" ] && rep "41$l"; done"#);
-        assert_eq!(
-            mutator.mutate(&mut state, &mut input).unwrap(),
-            MutationResult::Mutated
-        );
-        assert_eq!(input.mutator_bytes(), b"AAb");
     }
 
     #[test]
@@ -1492,7 +1359,7 @@ mod tests {
         fn test_request_format_and_mutation() {
             // Only answers if the request has the expected format.
             let (result, parts, _) = mutate_ab(
-                r#"[ "$st" = "" ] && [ "$k1 $v1 $k2 $v2" = "226122 78 226222 79" ] && rep "$k1 41$v1 $k2 $v2""#,
+                r#"[ "$k1 $v1 $k2 $v2" = "226122 78 226222 79" ] && rep "$k1 41$v1 $k2 $v2""#,
             );
             assert_eq!(result, MutationResult::Mutated);
             assert_eq!(parts, owned(&[("a", "Ax"), ("b", "y")]));
