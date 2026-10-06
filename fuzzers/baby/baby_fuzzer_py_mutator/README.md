@@ -40,17 +40,17 @@ Semantics (see the module docs in `libafl/src/mutators/python.rs` for the full l
 
 ### Multipart inputs
 
-`mutate_multi` gets one `(key, value)` tuple per part of a `MultipartInput<I, K>` and returns a list of such tuples.
-The key type `K` here is always `str`
- Python can change the values and reorder, remove,
-  or duplicate parts (a pair with an existing key clones that key), but a result with a new key is `Skipped`
-  (with a `warn` log), like exceptions, wrong types, no parts, unchanged parts, and a part larger than `max_size`.
-- The constructor test-runs `mutate_multi` with the single part `("probe", <8 bytes>)`.
+`mutate_multi` gets one `(key, value)` tuple per part of a `MultipartInput` and returns a list of such tuples,
+which becomes the new input. The keys are plain `str`s (this mutator works on `MultipartInput<I, String>`):
+parts can be mutated, reordered, removed, added, and keys can be changed or invented freely.
+A result is `Skipped` (logged) only for the same reasons as for bytes: an exception, a wrong type,
+no parts at all, the unchanged input, or a part larger than `max_size`.
+The constructor test-runs `mutate_multi` with the single part `("probe", <8 bytes>)`.
 
 ```python
 def mutate_multi(parts):  # [("header", b"..."), ("payload", b"...")]
     key, value = random.choice(parts)
-    return parts + [(key, value + b"!")]  # duplicates an (existing) key
+    return parts + [(key + "_2", value + b"!")]  # adds a part under a new key
 ```
 
 ## The Python mutator
@@ -60,7 +60,7 @@ def mutate_multi(parts):  # [("header", b"..."), ("payload", b"...")]
 using AFL-style "interesting" values, mostly printable.
 
 Its `mutate_multi` usually mutates the value of one part with `mutate`, and sometimes duplicates
-(with a mutated value), removes, or swaps parts.
+(with a mutated value), removes, swaps, or renames parts.
 
 It also runs stand-alone, to test and debug the mutation strategy in isolation:
 

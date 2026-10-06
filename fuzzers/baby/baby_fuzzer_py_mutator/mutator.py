@@ -11,9 +11,9 @@ so each fuzzer run gets its own (reproducible) mutation stream.
 >>> mutate(b"hello world")  # doctest: +SKIP
 b'he\x00lo worlD'
 
-`mutate_multi(parts: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]` gets the key (`str`) and the value of each part. It usually mutates the value
-of one part, sometimes the list of parts. Keys are opaque: it can reuse the existing keys
-(duplicate, reorder, remove parts), but the fuzzer skips results with new keys.
+`mutate_multi(parts: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]` gets a `(key, value)`
+tuple per part, the key being a plain `str`. The returned list of tuples becomes the new input:
+parts can be mutated, reordered, removed, added, and keys can be changed or invented freely.
 
 Stand-alone mode, to test and debug the mutation strategy in isolation::
 
@@ -109,7 +109,7 @@ def mutate(b: bytes) -> bytes:
 
 def mutate_multi(parts: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
     """The function called by the `PyMutator` for multipart inputs: usually mutates the value of
-    one part, sometimes duplicates (with a mutated value), removes, or swaps parts."""
+    one part, sometimes duplicates (with a mutated value), removes, swaps, or renames parts."""
     parts = list(parts)
     if not parts:
         return parts
@@ -122,6 +122,11 @@ def mutate_multi(parts: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
     elif roll < 0.2 and len(parts) > 1:
         a, b = random.randrange(len(parts)), random.randrange(len(parts))
         parts[a], parts[b] = parts[b], parts[a]
+    elif roll < 0.25:
+        # keys are plain strings: renaming a part is just changing its `str`
+        idx = random.randrange(len(parts))
+        key, value = parts[idx]
+        parts[idx] = (key + chr(random.randint(0x41, 0x5A)), value)
     else:
         idx = random.randrange(len(parts))
         key, value = parts[idx]

@@ -6,7 +6,7 @@
 //! - `mutate(b: bytes) -> bytes` mutates a bytes input: it receives the input as `bytes` and
 //!   returns the mutated input as a bytes-like object (`bytes`, `bytearray`, or a list of `int`s).
 //! - `mutate_multi(parts: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]` mutates a
-//!   [`MultipartInput`](crate::inputs::MultipartInput) (feature `multipart_inputs`),
+//!   [`MultipartInput`](crate::inputs::MultipartInput) with `String` keys (feature `multipart_inputs`),
 //!   see [below](#multipart-inputs).
 //!
 //! The function matching the input type is used; mutating an input for which the function is missing
@@ -25,20 +25,14 @@
 //!
 //! # Multipart inputs
 //!
-//! `mutate_multi` gets a list of `(key, value)` tuples, one per part, and returns a list of tuples.
-//! The key type `K` of a `MultipartInput<I, K>` is generic, but Python needs a `str`. As a quirk
-//! (shared with the [`ExternalProcessMutator`](super::ExternalProcessMutator)), the key is
-//! formatted with its [`Debug`](core::fmt::Debug) implementation, and then
-//! **one leading and one trailing `"` are removed, if present**. So for `K = String`, the key `a`
-//! is passed as `a` (its `Debug` string is `"a"`). The tests only cover `K = String`.
+//! This mutator commits to [`MultipartInput`](crate::inputs::MultipartInput)s with `String` keys,
+//! so the keys are plain strings on both sides. `mutate_multi` gets a list of `(key, value)`
+//! tuples, one per part, and the list of tuples it returns becomes the parts of the new input:
+//! Python can change the values, reorder, remove, and add parts, and it may mutate the keys or
+//! invent new ones freely. Each returned value is written into a new default-constructed `I`.
 //!
-//! Keys can't be created from strings, so each key of the result has to match one of the input's keys:
-//! the `Debug` string of the key has to be equal to the returned `str` with the removed `"` re-added
-//! (so a returned `"a"` with quotes does *not* match the `String` key `a`).
-//! Python can change the parts' bytes and reorder, remove, or duplicate parts (a new pair with an
-//! existing key clones that key), but it can't introduce new keys: a result with an unknown key is
-//! logged with `warn` and `Skipped`. As for bytes, exceptions, wrongly typed results, empty results (no parts),
-//! unchanged results, and parts larger than [`HasMaxSize::max_size`] are `Skipped`, too.
+//! As for bytes, exceptions, wrongly typed results, empty results (no parts), unchanged results,
+//! and parts larger than [`HasMaxSize::max_size`] are `Skipped`.
 //!
 //! Unlike [`ExternalProcessMutator`](super::ExternalProcessMutator), there is **no timeout**:
 //! a blocking `mutate` (e.g., an endless loop) blocks the fuzzer.
@@ -297,31 +291,21 @@ where
     }
 }
 
-/// The key as Python sees it: its [`Debug`] string, without the surrounding `"` (if any).
-/// This is a quirk to get a `str` from any `K`, see the [module docs](self#multipart-inputs).
-#[cfg(feature = "multipart_inputs")]
-fn py_key(debug: &str) -> &str {
-    let key = debug.strip_prefix('"').unwrap_or(debug);
-    key.strip_suffix('"').unwrap_or(key)
-}
-
-/// Mutates a [`MultipartInput`] with the Python function `mutate_multi`, which gets the parts as
-/// a list of `(key, bytes)` (keys formatted as described at [`py_key`]) and returns such a list.
+/// Mutates a [`MultipartInput`] with `String` keys using the Python function `mutate_multi`,
+/// which gets the parts as a list of `(key, bytes)` tuples and returns such a list.
 ///
-/// A key that Python returns has to match the [`Debug`] string of an existing key (with `"`
-/// re-added), since keys can't be created from strings: the matching key is cloned.
-/// This allows to change, reorder, remove, and duplicate parts, but not to add new keys.
+/// The returned list is applied as-is: Python can change the values, reorder, remove, and add
+/// parts, and choose the keys freely. Each value becomes a new default-constructed `I`.
 #[cfg(feature = "multipart_inputs")]
-impl<I, K, S> Mutator<MultipartInput<I, K>, S> for PyMutator
+impl<I, S> Mutator<MultipartInput<I, String>, S> for PyMutator
 where
-    I: HasMutatorBytes + ResizableMutator<u8> + Clone,
-    K: Debug + Clone,
+    I: HasMutatorBytes + ResizableMutator<u8> + Default,
     S: HasMaxSize,
 {
     fn mutate(
         &mut self,
         state: &mut S,
-        input: &mut MultipartInput<I, K>,
+        input: &mut MultipartInput<I, String>,
     ) -> Result<MutationResult, Error> {
         let Some(function) = &self.mutate_multi else {
             return Err(Error::illegal_state(format!(
@@ -329,16 +313,10 @@ where
                 self.name, self.source
             )));
         };
-        // `Debug` strings of the keys, to match the keys of the result against
-        let debug_keys: Vec<String> = input
+        let request: Vec<(&str, &[u8])> = input
             .parts()
             .iter()
-            .map(|(key, _)| format!("{key:?}"))
-            .collect();
-        let request: Vec<(&str, &[u8])> = debug_keys
-            .iter()
-            .zip(input.parts())
-            .map(|(key, (_, part))| (py_key(key), part.mutator_bytes()))
+            .map(|(key, part)| (key.as_str(), part.mutator_bytes()))
             .collect();
         let reply = match Self::call_multi(function, &request) {
             Ok(reply) => reply,
@@ -363,19 +341,9 @@ where
             );
             return Ok(MutationResult::Skipped);
         }
-
         let max_size = state.max_size();
         let mut parts = Vec::with_capacity(reply.len());
-        for (key, bytes) in &reply {
-            // Matching `py_key(debug) == key` is the same as re-adding the `"` that Python does not
-            // see and comparing with the `Debug` string (only if that has quotes in the first place)
-            let Some(idx) = debug_keys.iter().position(|k| py_key(k) == key) else {
-                log::warn!(
-                    "{}: python mutate_multi returned unknown key {key:?}, skipping",
-                    self.name
-                );
-                return Ok(MutationResult::Skipped);
-            };
+        for (key, bytes) in reply {
             if bytes.len() > max_size {
                 log::debug!(
                     "{}: python mutate_multi returned a part of {} bytes, exceeding max size {max_size}, skipping",
@@ -384,12 +352,10 @@ where
                 );
                 return Ok(MutationResult::Skipped);
             }
-            // Clone the key and the part (as a template for the new bytes) of the matching pair
-            let (key, template) = &input.parts()[idx];
-            let mut part = template.clone();
+            let mut part = I::default();
             part.resize(bytes.len(), 0);
-            part.mutator_bytes_mut().copy_from_slice(bytes);
-            parts.push((key.clone(), part));
+            part.mutator_bytes_mut().copy_from_slice(&bytes);
+            parts.push((key, part));
         }
         *input = MultipartInput::new(parts);
         Ok(MutationResult::Mutated)
@@ -594,8 +560,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Tests for [`crate::inputs::MultipartInput`], with `String` keys only (see the module docs).
-    /// The `Debug` string of the key `a` is `"a"`, but Python sees `a`.
+    /// Tests for [`crate::inputs::MultipartInput`] (with `String` keys, see the module docs).
     #[cfg(feature = "multipart_inputs")]
     mod multipart {
         use alloc::{
@@ -654,8 +619,8 @@ mod tests {
         }
 
         #[test]
-        fn test_keys_without_quotes() {
-            // Python sees the keys without `"`, and the result is mapped back to the existing keys
+        fn test_keys_are_plain_strings() {
+            // Python sees the keys verbatim, and the result is applied as-is
             let (result, out) = mutate_ab(
                 "def mutate_multi(parts): return [(k, v + b'|' + k.encode()) for k, v in parts]",
             );
@@ -664,31 +629,17 @@ mod tests {
         }
 
         #[test]
-        fn test_reorder_remove_duplicate() {
-            // Reorder, and a new pair with an existing key (clones the key)
+        fn test_reorder_remove_add_rename() {
+            // Reorder, remove, and add a part with a new key
             let (result, out) = mutate_ab(
-                "def mutate_multi(parts):\n    return [parts[-1], parts[0], ('a', b'new')]",
+                "def mutate_multi(parts):\n    return [parts[-1], parts[0], ('new', b'new')]",
             );
             assert_eq!(result, MutationResult::Mutated);
-            assert_eq!(out, parts(&[("b", b"y"), ("a", b"x"), ("a", b"new")]));
-            // Remove, and an empty part
-            let (result, out) = mutate_ab("def mutate_multi(parts): return [('b', b'')]");
+            assert_eq!(out, parts(&[("b", b"y"), ("a", b"x"), ("new", b"new")]));
+            // Rename a key (and an empty part)
+            let (result, out) = mutate_ab("def mutate_multi(parts): return [('b!', b'')]");
             assert_eq!(result, MutationResult::Mutated);
-            assert_eq!(out, parts(&[("b", b"")]));
-        }
-
-        #[test]
-        fn test_quote_in_key() {
-            // The `Debug` string of the key `q"x` is `"q\"x"`: only the outer quotes are removed
-            let mut state = TestState::new(12);
-            let mut mutator = PyMutator::from_code(
-                &mut state,
-                "def mutate_multi(parts): return [(k, k.encode()) for k, _ in parts]",
-            )
-            .unwrap();
-            let (result, out) = run_multi(&mut state, &mut mutator, &[("q\"x", b"v")]);
-            assert_eq!(result, MutationResult::Mutated);
-            assert_eq!(out, parts(&[("q\"x", b"q\\\"x")]));
+            assert_eq!(out, parts(&[("b!", b"")]));
         }
 
         #[test]
@@ -698,10 +649,8 @@ mod tests {
             for code in [
                 "def mutate_multi(parts): return parts",       // unchanged
                 "def mutate_multi(parts): return list(parts)", // unchanged
+                "def mutate_multi(parts): return [('a', b'x'), ('b', b'y')]", // unchanged (rebuilt)
                 "def mutate_multi(parts): return []",          // no parts
-                "def mutate_multi(parts): return [('zzz', b'x')]", // unknown key
-                "def mutate_multi(parts): return [('\"a\"', b'x')]", // quotes are not Python's
-                "def mutate_multi(parts): return [('a', b'x'), ('c', b'')]", // one unknown key
             ] {
                 assert_eq!(
                     mutate_ab(code),

@@ -60,8 +60,7 @@ fn harness_bytes(input: &FuzzInput) -> Vec<u8> {
     input.target_bytes().as_slice().to_vec()
 }
 
-/// The input type: multiple parts, identified by `String` keys
-/// (the `PyMutator` passes them to Python without the `"` of their `Debug` representation)
+/// The input type: multiple parts, identified by `String` keys (passed to Python verbatim)
 #[cfg(feature = "multipart")]
 type FuzzInput = MultipartInput<BytesInput, String>;
 
