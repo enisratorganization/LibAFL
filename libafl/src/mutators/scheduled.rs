@@ -279,7 +279,7 @@ pub struct ExtHavocScheduledMutator<MT, S, F> {
     name: Cow<'static, str>,
     mutations: MT,
     max_stack_pow: usize,
-    /// F: (state, num_mutations, iteration) -> Option<u64>
+    /// `F: (state, num_mutations, iteration) -> Option<u64>`
     /// User-supplied function to get the index of the mutator to use.
     /// Can be used for user-defined weighting. Also, first and last step are specially marked, see below.
     /// @iteration argument of type i64
