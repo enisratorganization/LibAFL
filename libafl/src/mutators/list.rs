@@ -1,16 +1,20 @@
 //! Mutator definitions for [`ListInput`]s. See [`crate::inputs::list`] for details.
 
-use alloc::borrow::Cow;
+use alloc::{borrow::Cow, vec::Vec};
 use core::num::NonZero;
 
 use libafl_bolts::{Error, Named, rands::Rand};
 use tuple_list::{tuple_list, tuple_list_type};
 
+use crate::HasMetadata;
 use crate::{
     corpus::Corpus,
     generators::Generator,
     inputs::{Input, ListInput, multi::MultipartInput},
-    mutators::{MutationResult, Mutator},
+    mutators::{
+        MutationResult, Mutator,
+        multi::{PolicyKey, mutation_allowed, part_crossover_allowed},
+    },
     random_corpus_id,
     state::{HasCorpus, HasMaxSize, HasRand},
 };
@@ -79,18 +83,28 @@ impl<G> Named for GenerateToAppendMutator<G> {
 /// Mutator that removes the last entry from a [`MultipartInput`].
 ///
 /// Returns [`MutationResult::Skipped`] if the input is empty.
+/// Parts with a key blacklisted by a [`crate::mutators::multi::MultipartMutationPolicy`] are
+/// never removed.
 #[derive(Debug)]
 pub struct RemoveLastEntryMutator;
 
 impl<I, K, S> Mutator<MultipartInput<I, K>, S> for RemoveLastEntryMutator
 where
-    K: Default,
+    K: Default + PolicyKey,
+    S: HasMetadata,
 {
     fn mutate(
         &mut self,
-        _state: &mut S,
+        state: &mut S,
         input: &mut MultipartInput<I, K>,
     ) -> Result<MutationResult, Error> {
+        if input
+            .parts()
+            .last()
+            .is_some_and(|(key, _)| !mutation_allowed(state, key))
+        {
+            return Ok(MutationResult::Skipped);
+        }
         match input.pop_part() {
             Some(_) => Ok(MutationResult::Mutated),
             None => Ok(MutationResult::Skipped),
@@ -115,25 +129,32 @@ impl Named for RemoveLastEntryMutator {
 /// Mutator that removes a random entry from a [`MultipartInput`].
 ///
 /// Returns [`MutationResult::Skipped`] if the input is empty.
+/// Parts with a key blacklisted by a [`crate::mutators::multi::MultipartMutationPolicy`] are
+/// never removed.
 #[derive(Debug)]
 pub struct RemoveRandomEntryMutator;
 
 impl<I, K, S> Mutator<MultipartInput<I, K>, S> for RemoveRandomEntryMutator
 where
-    S: HasRand,
+    K: PolicyKey,
+    S: HasRand + HasMetadata,
 {
     fn mutate(
         &mut self,
         state: &mut S,
         input: &mut MultipartInput<I, K>,
     ) -> Result<MutationResult, Error> {
-        match MultipartInput::len(input) {
-            0 => Ok(MutationResult::Skipped),
-            len => {
-                // Safety: null checks are done above
-                let index = state
-                    .rand_mut()
-                    .below(unsafe { NonZero::new_unchecked(len) });
+        let removable: Vec<usize> = input
+            .parts()
+            .iter()
+            .enumerate()
+            .filter(|&(_, (key, _))| mutation_allowed(state, key))
+            .map(|(idx, _)| idx)
+            .collect();
+        match NonZero::new(removable.len()) {
+            None => Ok(MutationResult::Skipped),
+            Some(len) => {
+                let index = removable[state.rand_mut().below(len)];
                 input.remove_part_at_index(index);
                 Ok(MutationResult::Mutated)
             }
@@ -156,14 +177,17 @@ impl Named for RemoveRandomEntryMutator {
 }
 
 /// Mutator that inserts a random part from another [`MultipartInput`] into the current input.
+///
+/// Parts with a key blacklisted by a [`crate::mutators::multi::MultipartMutationPolicy`] are
+/// never inserted.
 #[derive(Debug)]
 pub struct CrossoverInsertMutator;
 
 impl<I, K, S> Mutator<MultipartInput<I, K>, S> for CrossoverInsertMutator
 where
-    S: HasCorpus<MultipartInput<I, K>> + HasMaxSize + HasRand,
+    S: HasCorpus<MultipartInput<I, K>> + HasMaxSize + HasRand + HasMetadata,
     I: Clone,
-    K: Clone,
+    K: Clone + PolicyKey,
 {
     fn mutate(
         &mut self,
@@ -182,13 +206,20 @@ where
         let mut testcase = state.corpus().get(id)?.borrow_mut();
         let other = testcase.load_input(state.corpus())?;
 
-        let other_len = other.len();
+        // the parts of the other input that may be inserted into this one
+        let insertable: Vec<usize> = other
+            .parts()
+            .iter()
+            .enumerate()
+            .filter(|&(_, (key, _))| mutation_allowed(state, key))
+            .map(|(idx, _)| idx)
+            .collect();
 
-        let (key, part) = match other_len {
-            0 => return Ok(MutationResult::Skipped),
-            len => other.parts()[other_idx_raw % len].clone(),
-        };
+        if insertable.is_empty() {
+            return Ok(MutationResult::Skipped);
+        }
 
+        let (key, part) = other.parts()[insertable[other_idx_raw % insertable.len()]].clone();
         input.insert_part(current_idx, (key, part));
         Ok(MutationResult::Mutated)
     }
@@ -209,39 +240,57 @@ impl Named for CrossoverInsertMutator {
 }
 
 /// Mutator that replaces a random part from the current [`MultipartInput`] with a random part from another input.
+///
+/// With a [`crate::mutators::multi::MultipartMutationPolicy`], parts with blacklisted keys are
+/// never replaced, and parts are only replaced by parts whose key belongs to the same
+/// crossover group.
 #[derive(Debug)]
 pub struct CrossoverReplaceMutator;
 
 impl<I, K, S> Mutator<MultipartInput<I, K>, S> for CrossoverReplaceMutator
 where
-    S: HasCorpus<MultipartInput<I, K>> + HasMaxSize + HasRand,
+    S: HasCorpus<MultipartInput<I, K>> + HasMaxSize + HasRand + HasMetadata,
     I: Clone,
-    K: Clone,
+    K: Clone + PolicyKey,
 {
     fn mutate(
         &mut self,
         state: &mut S,
         input: &mut MultipartInput<I, K>,
     ) -> Result<MutationResult, Error> {
-        let current_idx = match input.len() {
-            0 => return Ok(MutationResult::Skipped),
-            len => state
-                .rand_mut()
-                .below(unsafe { NonZero::new_unchecked(len) }),
+        // the parts of this input that may be replaced
+        let replaceable: Vec<usize> = input
+            .parts()
+            .iter()
+            .enumerate()
+            .filter(|&(_, (key, _))| mutation_allowed(state, key))
+            .map(|(idx, _)| idx)
+            .collect();
+        let current_idx = match NonZero::new(replaceable.len()) {
+            None => return Ok(MutationResult::Skipped),
+            Some(len) => replaceable[state.rand_mut().below(len)],
         };
         let other_idx_raw = state.rand_mut().next() as usize;
+        let target_key = &input.part_at_index(current_idx).unwrap().0;
 
         let id = random_corpus_id!(state.corpus(), state.rand_mut());
         let mut testcase = state.corpus().get(id)?.borrow_mut();
         let other = testcase.load_input(state.corpus())?;
 
-        let other_len = other.len();
+        // the parts of the other input that may replace it
+        let sources: Vec<usize> = other
+            .parts()
+            .iter()
+            .enumerate()
+            .filter(|&(_, (key, _))| part_crossover_allowed(state, target_key, key))
+            .map(|(idx, _)| idx)
+            .collect();
 
-        let (key, part) = match other_len {
-            0 => return Ok(MutationResult::Skipped),
-            len => other.parts()[other_idx_raw % len].clone(),
-        };
+        if sources.is_empty() {
+            return Ok(MutationResult::Skipped);
+        }
 
+        let (key, part) = other.parts()[sources[other_idx_raw % sources.len()]].clone();
         input.remove_part_at_index(current_idx);
         input.insert_part(current_idx, (key, part));
         Ok(MutationResult::Mutated)
