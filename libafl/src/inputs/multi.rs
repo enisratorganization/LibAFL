@@ -12,12 +12,12 @@ use std::{fs::File, io::Read, path::Path};
 
 use serde::{Serialize, de::DeserializeOwned};
 
+use libafl_bolts::HasLen;
+
+use crate::corpus::CorpusId;
 #[cfg(feature = "std")]
-use crate::inputs::{BytesInput, HasMutatorBytes};
-use crate::{
-    corpus::CorpusId,
-    inputs::{Input, ListInput},
-};
+use crate::inputs::BytesInput;
+use crate::inputs::{HasMutatorBytes, Input, ListInput};
 #[cfg(feature = "std")]
 use libafl_bolts::{Error, fs::write_file_atomic};
 
@@ -125,6 +125,19 @@ where
             file.read_to_end(&mut bytes)?;
             Ok(postcard::from_bytes(&bytes)?)
         }
+    }
+}
+
+/// The total length of all parts' bytes, e.g. for length-aware schedulers.
+impl<I, K> HasLen for MultipartInput<I, K>
+where
+    I: HasMutatorBytes,
+{
+    fn len(&self) -> usize {
+        self.parts()
+            .iter()
+            .map(|(_, input)| input.mutator_bytes().len())
+            .sum()
     }
 }
 
