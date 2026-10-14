@@ -217,6 +217,22 @@ impl<I, S, Z> Debug for LoadConfig<'_, I, S, Z> {
     }
 }
 
+#[cfg(feature = "std")]
+impl<'a, I, S, Z> LoadConfig<'a, I, S, Z> {
+    /// Create a new [`LoadConfig`] with a custom `loader` and the `forced` and `exit_on_solution` flags
+    pub fn new(
+        loader: &'a mut dyn FnMut(&mut Z, &mut S, &Path) -> Result<I, Error>,
+        forced: bool,
+        exit_on_solution: bool,
+    ) -> Self {
+        Self {
+            forced,
+            loader,
+            exit_on_solution,
+        }
+    }
+}
+
 /// The state a fuzz run.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(bound = "
@@ -719,7 +735,7 @@ where
     /// Loads initial inputs from the passed-in `in_dirs`.
     /// If `forced` is true, will add all testcases, no matter what.
     /// This method takes a list of files.
-    fn load_initial_inputs_custom_by_filenames<E, EM, Z>(
+    pub fn load_initial_inputs_custom_by_filenames<E, EM, Z>(
         &mut self,
         fuzzer: &mut Z,
         executor: &mut E,
